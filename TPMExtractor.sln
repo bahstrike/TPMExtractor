@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35431.28
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TPMExtractor", "TPMExtractor.vcxproj", "{8B983429-3313-4141-BDA0-7025B04AB7D8}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x86 = Debug|x86
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8B983429-3313-4141-BDA0-7025B04AB7D8}.Debug|x86.ActiveCfg = Debug|Win32
+		{8B983429-3313-4141-BDA0-7025B04AB7D8}.Debug|x86.Build.0 = Debug|Win32
+		{8B983429-3313-4141-BDA0-7025B04AB7D8}.Release|x86.ActiveCfg = Release|Win32
+		{8B983429-3313-4141-BDA0-7025B04AB7D8}.Release|x86.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {10477FAC-F3E7-42D2-A410-D86B83691B68}
+	EndGlobalSection
+EndGlobal
