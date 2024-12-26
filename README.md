@@ -23,3 +23,6 @@ Example:
 - Strike [@bahstrike](https://github.com/bahstrike) - Code, File analysis
 - shiny [@shinyquagsire23](https://github.com/shinyquagsire23) - .B3D decompression
 - Wolfgang Frisch [@wfr](https://github.com/wfr) - .Z decompression
+
+### Disclaimer
+This project is in no way affiliated with LEC or Disney. Use at your own peril.
