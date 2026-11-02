@@ -1,193 +1,256 @@
 // Code provided by shiny
+// Modified 2026 in the TPMExtractor fork (see CHANGES.md): the decoder works on memory buffers:
+// bounds-checked bit reads, input and output size limits, and an explicit result (end marker,
+// truncated input, output limit) instead of silently stopping. It reproduces the bit order, ring
+// and token rules of shiny's port of the game's reader byte for byte, including what that code
+// wrote for a token cut off by the end of the file (see lzss_decode).
 
-#include <stdio.h>
+#include "b3d_decompress.h"
+
+#include "platform.h"
+#include "textout.h"
+
+#include <cstdint>
 #include <vector>
 
-//#pragma pack(push, 1)
-typedef struct file_struct
+namespace tpmx {
+
+namespace {
+
+const unsigned kRingSize = 0x1000;       // 4 KiB window
+const unsigned kRingMask = kRingSize - 1;
+const unsigned kRingStart = 1;           // first write position (the ring starts zeroed)
+const int kLiteralBits = 8;
+const int kOffsetBits = 12;
+const int kLengthBits = 4;
+const unsigned kMinCopy = 2;             // a copy of length field L writes L + 2 bytes
+
+// Most-significant-bit-first reader with the original reader's state: `mask_` is the next bit
+// to take from `cur_`, and 0x80 means the next bit needs a new input byte. The original reader
+// fetched a byte only when it needed its first bit, so a value cut off by the end of the input
+// leaves the reader waiting for a byte; bit() then fails for good.
+class BitReader
 {
-	FILE* real_fhand;
-	int is_compressed;
-	int seek_pos_maybe;
-	int tmpbuf1_pos;
-	int tmpbuf2_pos;
-	int tmpbuf2_left;
-	int tmpbuf1_left;
-	int field_18;
-	int field_14;
-	int field_20;
-	uint8_t reading_bitmask;
-	uint8_t last_read_tmpbuf2;
-	uint8_t tmpbuf_1[0x1000];
-	uint8_t tmpbuf_2[0x2000];
-} file_struct;
+public:
+    BitReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
 
-//#pragma pack(pop)
+    // One bit into b; false if a new byte is needed and the input has none left.
+    bool bit(unsigned& b)
+    {
+        if (mask_ == 0x80) {
+            if (pos_ >= size_)
+                return false;
+            cur_ = data_[pos_++];
+        }
+        b = (cur_ & mask_) ? 1u : 0u;
+        mask_ = (uint8_t)(mask_ >> 1);
+        if (!mask_)
+            mask_ = 0x80;
+        return true;
+    }
 
-int decompress_helper_1(file_struct* fhand, char a2)
+    // An n-bit value, most significant bit first; false if the input ran out first.
+    bool bits(int n, unsigned& v)
+    {
+        v = 0;
+        for (int i = n - 1; i >= 0; i--) {
+            unsigned b = 0;
+            if (!bit(b))
+                return false;
+            v |= b << i;
+        }
+        return true;
+    }
+
+    size_t consumed() const { return pos_; }
+
+private:
+    const uint8_t* data_;
+    size_t size_;
+    size_t pos_ = 0;
+    uint8_t cur_ = 0;
+    uint8_t mask_ = 0x80;
+};
+
+std::string mib(size_t bytes) { return format("%zu MiB", bytes >> 20); }
+
+} // namespace
+
+LzssResult lzss_decode(const uint8_t* in, size_t in_size, std::vector<uint8_t>& out, size_t max_output,
+                       bool original_quirks)
 {
-	int v3; // [esp+0h] [ebp-8h]
-	unsigned int v4; // [esp+4h] [ebp-4h]
+    LzssResult r;
+    const size_t start = out.size();
+    uint8_t ring[kRingSize] = {};
+    unsigned wpos = kRingStart;
+    BitReader br(in, in_size);
 
-	v4 = 1 << (a2 - 1);
-	v3 = 0;
-	while (v4)
-	{
-		if (fhand->reading_bitmask == 0x80)
-		{
-			if (fhand->tmpbuf2_pos >= fhand->tmpbuf2_left)
-				return 0;
-			fhand->last_read_tmpbuf2 = (uint8_t)fhand->tmpbuf_2[fhand->tmpbuf2_pos++];
-		}
-		if ((fhand->reading_bitmask & fhand->last_read_tmpbuf2) != 0)
-			v3 |= v4;
-		v4 >>= 1;
-		fhand->reading_bitmask >>= 1;
-		if (!fhand->reading_bitmask)
-			fhand->reading_bitmask = 0x80;
-	}
-	return v3;
+    // Appends one byte to the output and the ring; false once max_output bytes were produced.
+    auto put = [&](uint8_t c) -> bool {
+        if (out.size() - start >= max_output)
+            return false;
+        out.push_back(c);
+        ring[wpos] = c;
+        wpos = (wpos + 1) & kRingMask;
+        return true;
+    };
+
+    for (;;) {
+        unsigned flag = 0;
+        if (!br.bit(flag)) {
+            r.end = LzssEnd::InputEnd;
+            break;
+        }
+        if (flag) {
+            unsigned c = 0;
+            if (!br.bits(kLiteralBits, c)) {
+                // The original's bit reader returned 0 for a value it could not finish, so a
+                // literal cut off by the end of the file became a 0 byte.
+                if (original_quirks && !put(0)) {
+                    r.end = LzssEnd::OutputLimit;
+                    break;
+                }
+                r.end = LzssEnd::InputEnd;
+                break;
+            }
+            if (!put((uint8_t)c)) {
+                r.end = LzssEnd::OutputLimit;
+                break;
+            }
+            continue;
+        }
+
+        unsigned offset = 0;
+        if (!br.bits(kOffsetBits, offset)) {
+            // The original read the cut-off offset as 0, the end marker: nothing more is written.
+            r.end = LzssEnd::InputEnd;
+            break;
+        }
+        if (offset == 0) {
+            r.end = LzssEnd::Marker;
+            break;
+        }
+        unsigned length = 0;
+        const bool have_length = br.bits(kLengthBits, length);
+        if (!have_length) {
+            if (!original_quirks) {
+                r.end = LzssEnd::InputEnd;
+                break;
+            }
+            length = 0;  // the original's value for a cut-off length: the copy still writes 2 bytes
+        }
+        bool room = true;
+        // Byte by byte: a copy may read ring positions it has just written (overlapping runs).
+        for (unsigned i = 0; i < length + kMinCopy && room; i++)
+            room = put(ring[(offset + i) & kRingMask]);
+        if (!room) {
+            r.end = LzssEnd::OutputLimit;
+            break;
+        }
+        if (!have_length) {
+            r.end = LzssEnd::InputEnd;
+            break;
+        }
+    }
+    r.consumed = br.consumed();
+    r.produced = out.size() - start;
+    return r;
 }
 
-int file_decompressy_idk(file_struct* fhand)
+bool b3d_decompress(const uint8_t* in, size_t in_size, const std::string& name, std::vector<uint8_t>& out,
+                    bool original_quirks, LzssResult* result, std::string* err)
 {
-	int result; // eax
-	int bit_masked; // [esp+8h] [ebp-24h]
-	int to_read_tmpbuf2; // [esp+Ch] [ebp-20h]
-	int i; // [esp+10h] [ebp-1Ch]
-	int v5; // [esp+14h] [ebp-18h]
-	size_t v6; // [esp+18h] [ebp-14h]
-	char v7; // [esp+1Ch] [ebp-10h]
-	char v8; // [esp+1Ch] [ebp-10h]
-	int v9; // [esp+24h] [ebp-8h]
-	int16_t v10; // [esp+28h] [ebp-4h]
+    out.clear();
+    if (result)
+        *result = LzssResult();
+    if (!in || in_size < kB3dRawHeaderSize) {
+        if (err)
+            *err = format("%s: file shorter than the 0x%zX-byte B3D header (%zu bytes)", name.c_str(),
+                          kB3dRawHeaderSize, in ? in_size : (size_t)0);
+        return false;
+    }
+    if (in_size > kB3dMaxImageSize) {
+        if (err)
+            *err = format("%s: %zu bytes, larger than the %s accepted for a level file", name.c_str(), in_size,
+                          mib(kB3dMaxImageSize).c_str());
+        return false;
+    }
 
-	v5 = fhand->tmpbuf2_left - 0x80;
-	fhand->seek_pos_maybe = 0;
-	result = (int)fhand;
-	fhand->tmpbuf1_pos = 0;
-	if (!fhand->field_18)
-	{
-		while (1)
-		{
-			result = fhand->tmpbuf1_pos;
-			if (result >= 0xF80)
-				break;
-			if (fhand->reading_bitmask == 0x80)
-			{
-				if (!fhand->field_14 && fhand->tmpbuf2_pos >= v5)
-				{
-					if (fhand->tmpbuf2_pos < fhand->tmpbuf2_left)
-						memcpy(fhand->tmpbuf_2, &fhand->tmpbuf_2[fhand->tmpbuf2_pos], fhand->tmpbuf2_left - fhand->tmpbuf2_pos);
-					fhand->tmpbuf2_left -= fhand->tmpbuf2_pos;
-					fhand->tmpbuf2_pos = 0;
-					to_read_tmpbuf2 = 0x1000 - fhand->tmpbuf2_left;
-					v6 = fread(&fhand->tmpbuf_2[fhand->tmpbuf2_left], 1u, to_read_tmpbuf2, fhand->real_fhand);
-					if (v6 != to_read_tmpbuf2)
-						fhand->field_14 = 1;
-					fhand->tmpbuf2_left += v6;
-					v5 = fhand->tmpbuf2_left - 128;
-				}
-				result = (int)fhand;
-				if (fhand->tmpbuf2_pos >= fhand->tmpbuf2_left)
-					return result;
-				fhand->last_read_tmpbuf2 = (uint8_t)fhand->tmpbuf_2[fhand->tmpbuf2_pos++];
-			}
-			bit_masked = fhand->reading_bitmask & fhand->last_read_tmpbuf2;
-			fhand->reading_bitmask >>= 1;
-			if (!fhand->reading_bitmask)
-				fhand->reading_bitmask = 0x80;
-			if (bit_masked)
-			{
-				v7 = decompress_helper_1(fhand, 8);
-				fhand->tmpbuf_2[fhand->field_20 + 0x1000] = v7;
-				fhand->tmpbuf_1[fhand->tmpbuf1_pos++] = v7;
-				fhand->field_20 = ((uint16_t)fhand->field_20 + 1) & 0xFFF;
-			}
-			else
-			{
-				result = decompress_helper_1(fhand, 12);
-				v10 = result;
-				if (!result)
-				{
-					fhand->field_18 = 1;
-					return result;
-				}
-				v9 = decompress_helper_1(fhand, 4) + 1;
-				for (i = 0; i <= v9; ++i)
-				{
-					v8 = fhand->tmpbuf_2[(((uint16_t)i + v10) & 0xFFF) + 4096];
-					fhand->tmpbuf_1[fhand->tmpbuf1_pos++] = v8;
-					fhand->tmpbuf_2[fhand->field_20 + 4096] = v8;
-					fhand->field_20 = ((uint16_t)fhand->field_20 + 1) & 0xFFF;
-				}
-			}
-		}
-	}
-	return result;
+    // Retail levels expand 3.3x to 4.8x; reserve for 5x up to the limit.
+    const size_t payload = in_size - kB3dRawHeaderSize;
+    const size_t max_payload = kB3dMaxImageSize - kB3dRawHeaderSize;
+    out.reserve(kB3dRawHeaderSize + (payload < max_payload / 5 ? payload * 5 : max_payload));
+    out.assign(in, in + kB3dRawHeaderSize);
+    out[kB3dCompressedFlagOffset] = 0;  // decompressed
+
+    const LzssResult r = lzss_decode(in + kB3dRawHeaderSize, payload, out, max_payload, original_quirks);
+    if (result)
+        *result = r;
+    switch (r.end) {
+    case LzssEnd::Marker:
+        return true;
+    case LzssEnd::InputEnd:
+        if (err)
+            *err = format("%s @0x%zX: the compressed data ends without its end marker (truncated file?); "
+                          "%zu bytes decoded",
+                          name.c_str(), in_size, out.size());
+        return false;
+    case LzssEnd::OutputLimit:
+        if (err)
+            *err = format("%s @0x%zX: decompressed data exceeds the %s limit; not a level file?", name.c_str(),
+                          kB3dRawHeaderSize + r.consumed, mib(kB3dMaxImageSize).c_str());
+        return false;
+    }
+    return false;
 }
 
-size_t fread_wrap_compressed(void* a1, size_t a2, size_t a3, file_struct* a4)
+bool b3d_read_file(const std::string& path, std::vector<uint8_t>& out, std::string* err)
 {
-	int v5; // [esp+8h] [ebp-10h]
-	signed int i; // [esp+Ch] [ebp-Ch]
-	signed int bytes_read; // [esp+10h] [ebp-8h]
-	char* v8; // [esp+14h] [ebp-4h]
-
-	v8 = (char*)a1;
-	if (!a4->is_compressed)
-		return fread(a1, a2, a3, a4->real_fhand);
-
-	v5 = 0;
-	for (i = a2 * a3; i; i -= bytes_read)
-	{
-		if (a4->seek_pos_maybe >= a4->tmpbuf1_pos)
-			file_decompressy_idk(a4);
-		bytes_read = a4->tmpbuf1_pos - a4->seek_pos_maybe;
-
-		//printf("read %x\n", bytes_read);
-
-		if (!bytes_read)
-			return v5 / (int)a2;
-		if (bytes_read > i)
-			bytes_read = i;
-		memcpy(v8, &a4->tmpbuf_1[a4->seek_pos_maybe], bytes_read);
-		v8 += bytes_read;
-		a4->seek_pos_maybe += bytes_read;
-		v5 += bytes_read;
-	}
-	return v5 / (int)a2;
+    out.clear();
+    uint64_t size = 0;
+    if (platform::file_size(path, size) && size > kB3dMaxImageSize) {
+        if (err)
+            *err = format("%s: %llu bytes, larger than the %s accepted for a level file", path.c_str(),
+                          (unsigned long long)size, mib(kB3dMaxImageSize).c_str());
+        return false;
+    }
+    if (!platform::read_file(path, out, err))
+        return false;
+    if (out.size() > kB3dMaxImageSize) {  // the file grew while it was read
+        if (err)
+            *err = format("%s: larger than the %s accepted for a level file", path.c_str(),
+                          mib(kB3dMaxImageSize).c_str());
+        out.clear();
+        return false;
+    }
+    return true;
 }
 
-void decompress(const char* open_fpath, const char* out_fpath)
+bool b3d_decompress_file(const std::string& in_path, const std::string& out_path, std::string* err)
 {
-	file_struct f2;
-	FILE* f = fopen(open_fpath, "rb");
-	FILE* fout = fopen(out_fpath, "wb");
+    std::vector<uint8_t> in;
+    if (!b3d_read_file(in_path, in, err))
+        return false;
 
-	// Weird file struct
-	memset(&f2, 0, sizeof(f2));
-	f2.real_fhand = f;
-	f2.is_compressed = 1;
-	f2.reading_bitmask = 0x80;
-	f2.field_20 = 1;
-
-	// Read the header, edit compressed bit, and decompress as much as possible
-	uint8_t tmp[0x10000];
-	fread(tmp, 1, 0x8A4, f);
-	tmp[0x328] = 0; // decompressed
-	fwrite(tmp, 1, 0x8A4, fout);
-
-	while (1)
-	{
-		size_t len = fread_wrap_compressed(tmp, 1, 0x10000, &f2);
-
-		if (!len) break;
-		fwrite(tmp, 1, len, fout);
-	}
-
-	//printf("Decompressed to `%s`\n", out_fpath);
-
-	fclose(fout);
-	fclose(f);
+    std::vector<uint8_t> out;
+    LzssResult r;
+    std::string why;
+    const bool complete = b3d_decompress(in.data(), in.size(), in_path, out, true, &r, &why);
+    // Nothing is written for an input shorter than the raw header or for output over the limit;
+    // a truncated stream is written as the original wrote it, then reported.
+    if (!complete && (out.empty() || r.end == LzssEnd::OutputLimit)) {
+        if (err)
+            *err = why;
+        return false;
+    }
+    if (!platform::write_file(out_path, out, err))
+        return false;
+    if (!complete) {
+        if (err)
+            *err = why;
+        return false;
+    }
+    return true;
 }
+
+} // namespace tpmx
