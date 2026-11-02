@@ -18,6 +18,13 @@
  */
 
 /*
+ * Modified 2026 in the TPMExtractor fork (see CHANGES.md): altered source version. The window
+ * copy in decomp() no longer forms a pointer before the start of out[] ("to - dist", then
+ * "+ MAXWIN"), which is undefined behaviour in C and stops UBSan builds; it computes the same
+ * source position directly. The decompressed output is unchanged.
+ */
+
+/*
  * Change history:
  *
  * 1.0  12 Feb 2003     - First version
@@ -345,11 +352,13 @@ local int decomp(struct state *s)
             /* copy length bytes from distance bytes back */
             do {
                 to = s->out + s->next;
-                from = to - dist;
-                copy = MAXWIN;
-                if (s->next < dist) {
-                    from += copy;
+                if (s->next < dist) {   /* source wraps around the window (fork) */
+                    from = to + (MAXWIN - dist);
                     copy = dist;
+                }
+                else {
+                    from = to - dist;
+                    copy = MAXWIN;
                 }
                 copy -= s->next;
                 if (copy > len) copy = len;
