@@ -8,6 +8,9 @@
 > program's output is still available, byte for byte, with `--legacy`. This README was rewritten
 > for the fork in 2026; every change is listed in [CHANGES.md](CHANGES.md). The original
 > description, credits and disclaimer are kept below.
+>
+> Fork improvements (2026): Andrei Kiralv/Darkahn, with Claude (Anthropic), Red in Andrei's
+> projects.
 
 **No game data is included.** This repository holds source code and synthetic test data only. To
 extract anything you need your own copy of the game: the PC CD-ROM of *Star Wars: Episode I - The
@@ -350,6 +353,10 @@ Adler's blast (zlib license). Files changed by the fork say so at the top.
 - Strike [@bahstrike](https://github.com/bahstrike) - Code, File analysis
 - shiny [@shinyquagsire23](https://github.com/shinyquagsire23) - .B3D decompression
 - Wolfgang Frisch [@wfr](https://github.com/wfr) - .Z decompression
+
+### Fork credits
+- Andrei Kiralv/Darkahn, with Claude (Anthropic), Red in Andrei's projects - fork improvements
+  (2026)
 
 ### Disclaimer
 This project is in no way affiliated with LEC or Disney. Use at your own peril.
