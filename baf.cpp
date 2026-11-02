@@ -490,6 +490,8 @@ public:
 				(unsigned long long)remaining()));
 	}
 
+	[[noreturn]] void fail_at(size_t at, const std::string& message) const { throw ParseError(name_, at, message); }
+
 	size_t pos() const { return pos_; }
 	size_t remaining() const { return data_.size() - pos_; }
 	const uint8_t* here() const { return data_.data() + pos_; }
@@ -506,6 +508,23 @@ private:
 const uint64_t kLegacyVertexBytes = 12 + 12 + 8;       // position, normal, "uvscroll?" pair
 const uint64_t kLegacyFaceIndexBytes = 8;              // vertex index + texture vertex index
 const uint64_t kLegacyModelBytes = 32 + 4 + 4 + 92;    // name, mdunno1, numNodes, mdunno[23]
+
+// Bytes of a texture's first mip, (width * height * colorBits) / 8 as the original computed it
+// in int arithmetic: the same value for every mip that fits in a file. `at` is the file offset
+// of the texture header. A negative field (where the original's new[] failed) or a mip larger
+// than the rest of the file is an error there, found before any product that could overflow.
+int64_t legacy_mip_bytes(const LegacyReader& f, size_t at, const tMAT_TextureData& t, int32_t colorBits)
+{
+	if (t.width < 0 || t.height < 0 || colorBits < 0)
+		f.fail_at(at, format("texture %dx%d at %d bits per pixel: a negative size", t.width, t.height, colorBits));
+	const uint64_t texels = (uint64_t)t.width * (uint64_t)t.height;  // below 2^62
+	const uint64_t bits = (uint64_t)colorBits;
+	// texels * bits / 8 <= remaining exactly when texels <= (remaining * 8 + 7) / bits
+	if (bits != 0 && texels > ((uint64_t)f.remaining() * 8 + 7) / bits)
+		f.fail_at(at, format("texture %dx%d at %d bits per pixel needs more than the %llu bytes left", t.width,
+			t.height, colorBits, (unsigned long long)f.remaining()));
+	return (int64_t)(texels * bits / 8);
+}
 
 void legacy_loadmodel(LegacyReader& f, const std::string& szdump, const std::string& baf, int nNumMats,
                       const std::vector<std::string>& pszMatNames, float worldScale, const Options& opts)
@@ -1243,16 +1262,18 @@ bool legacy_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data,
 			f.check_count(hdr.numTextures, sizeof(tMAT_TextureData), "texture");
 		for (int texI = 0; texI < hdr.numTextures; texI++)
 		{
+			const size_t texAt = f.pos();
 			tMAT_TextureData texdat;
 			memset(&texdat, 0, sizeof texdat);
 			f.read(&texdat, sizeof(tMAT_TextureData));
 			copy(&texdat, sizeof(tMAT_TextureData));
 
-			// computed in 64 bits; the original used int arithmetic (the same for real sizes)
-			int64_t mipSize = ((int64_t)texdat.width * texdat.height * hdr.colorBits) / 8;
-
+			int64_t mipSize = 0;
 			for (int mipI = 0; mipI < texdat.numMipmaps; mipI++)
 			{
+				// checked before the first level is read (the original computed it unchecked)
+				if (mipI == 0)
+					mipSize = legacy_mip_bytes(f, texAt, texdat, hdr.colorBits);
 				// After the first level, an empty level reads and writes nothing: stop.
 				if (mipI > 0 && mipSize == 0)
 					break;

@@ -2094,6 +2094,10 @@ def baf_mutants(spec):
                    ('wrappersize', key, HUGE)]
     out = [('%s_%s.baf' % (stem, n), d) for n, d in _cuts(data, points)]
     out += [('%s_%s.baf' % (stem, n), _put32(data, off, v)) for n, off, v in fields]
+    # several fields at once: width and height both huge (width * height * bits per pixel
+    # overflows 64-bit arithmetic), and a negative colour depth with a texture to read
+    out.append(('%s_texhuge.baf' % stem, _put32(_put32(data, tex0, HUGE), tex0 + 4, HUGE)))
+    out.append(('%s_bppneg.baf' % stem, _put32(data, mat0 + 24, -0x80000000)))
     return out
 
 
