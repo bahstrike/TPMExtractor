@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Modified 2026 in the TPMExtractor fork (see CHANGES.md): lists the fork's source files (CMP.* removed). -->
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -126,9 +127,17 @@
     <ClCompile Include="b3d.cpp" />
     <ClCompile Include="b3d_decompress.cpp" />
     <ClCompile Include="baf.cpp" />
-    <ClCompile Include="CMP.cpp" />
+    <ClCompile Include="binreader.cpp" />
+    <ClCompile Include="bmp.cpp" />
+    <ClCompile Include="image.cpp" />
+    <ClCompile Include="jkout.cpp" />
     <ClCompile Include="lab.cpp" />
+    <ClCompile Include="log.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="options.cpp" />
+    <ClCompile Include="platform.cpp" />
+    <ClCompile Include="textout.cpp" />
+    <ClCompile Include="zextract.cpp" />
     <ClCompile Include="unshieldv3\blast.c" />
     <ClCompile Include="unshieldv3\ISArchiveV3.cpp" />
     <ClCompile Include="unshieldv3\unshieldv3.cpp" />
@@ -137,8 +146,16 @@
     <ClInclude Include="b3d.h" />
     <ClInclude Include="b3d_decompress.h" />
     <ClInclude Include="baf.h" />
-    <ClInclude Include="CMP.h" />
+    <ClInclude Include="binreader.h" />
+    <ClInclude Include="bmp.h" />
+    <ClInclude Include="image.h" />
+    <ClInclude Include="jkout.h" />
     <ClInclude Include="lab.h" />
+    <ClInclude Include="log.h" />
+    <ClInclude Include="options.h" />
+    <ClInclude Include="platform.h" />
+    <ClInclude Include="textout.h" />
+    <ClInclude Include="zextract.h" />
     <ClInclude Include="unshieldv3\blast.h" />
     <ClInclude Include="unshieldv3\ISArchiveV3.h" />
     <ClInclude Include="unshieldv3\unshieldv3.h" />
