@@ -100,10 +100,10 @@ file. The tool waits for a key before exiting only with `--pause` (the original 
                        creatures then stand on the floor in JK when their template
                        has size= at most the INSERT OFFSET z - 0.005), floor (the
                        lowest point; props), node0, zero, legacy, or X,Y,Z
---radius M             computed (default: the rest pose, and every key frame of a
-                       model that auto or node0 re-roots), animated (every key
-                       frame of every model), stored (TPM's own), legacy (0.1),
-                       or a value
+--radius M             animated (default: the rest pose and every key frame of
+                       every model), computed (the rest pose, and every key frame
+                       of a model that auto or node0 re-roots), stored (TPM's
+                       own), legacy (0.1), or a value
 --[no-]mat8            retail 8-bit MATs, used by the 3DOs (default on)
 --[no-]mat16           16-bit MATs for OpenJKDF2/MotS testing (default on)
 --[no-]bmp             BMP previews (default on)
@@ -170,9 +170,9 @@ OFFSET` z is that height. Give the template a `size=` of at most `INSERT OFFSET 
 larger `size=`, or none, it still floats. `auto` re-roots by node 0's height rounded to 1/1000 of
 a model unit, so BAFs that share a key still write identical keys (`node0` re-roots by the exact
 height). On a retail disc `auto` re-roots 250 of the 303 models; the others have node 0 at or
-below their origin and get exactly the `floor` output. A re-rooted model's `RADIUS` also covers
-every frame of its keys, since JK culls the whole model with that sphere around its origin; for
-the others, `--radius animated` does the same.
+below their origin and get exactly the `floor` output. By default every model's `RADIUS` also
+covers every frame of its keys (`--radius animated`), since JK culls the whole model with that
+sphere around its origin; with `--radius computed` only re-rooted models' do.
 
 **Several actors in one game.** JK keeps one model, key, MAT and colormap per file name, so two
 different files with the same name cannot be used side by side: the first one loaded wins.
@@ -216,8 +216,9 @@ The summary; [CHANGES.md](CHANGES.md) has the details.
 - **Default-mode BAF output for JK** (`--legacy` gives the original output; several items also
   have their own option):
   - the real BAF layout is read, so the one colormap-less BAF on the retail disc gets its model;
-  - computed 3DO `RADIUS` values (JK's rules) instead of the placeholder 0.1; for re-rooted
-    models also covering every animation frame (for every model with `--radius animated`);
+  - computed 3DO `RADIUS` values (JK's rules) instead of the placeholder 0.1, covering every
+    animation frame of the model (`--radius animated`, the default; `--radius computed` covers
+    the rest pose, and the keys only of re-rooted models);
   - a re-root at hierarchy node 0 for models whose node 0 lies above their origin, then the lowest
     point on the floor (`INSERT OFFSET`), so that people and creatures stand on the floor in JK
     (`--insert-offset auto`, the default; see "Standing on the floor");

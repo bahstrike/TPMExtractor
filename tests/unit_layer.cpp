@@ -348,7 +348,7 @@ static void test_options()
     CHECK(parse({"disc", "dump"}, p, err));
     const Options& o = p.opts;
     CHECK(!o.legacy && o.scale == 0.2f && o.draw_scale && o.angles == AngleMode::Raw);
-    CHECK(o.insert_offset.mode == InsertOffsetMode::Auto && o.radius.mode == RadiusMode::Computed);
+    CHECK(o.insert_offset.mode == InsertOffsetMode::Auto && o.radius.mode == RadiusMode::Animated);
     CHECK(o.mat8 && o.mat16 && o.bmp && o.palette.empty() && o.debug_dumps && !o.keep_decompressed);
     CHECK(!o.pause && o.verbose == 0 && p.positional.size() == 2 && !p.pause_explicit);
 

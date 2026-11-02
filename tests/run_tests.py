@@ -843,8 +843,8 @@ def check_3do_numbers(m, label, pb, radius='computed', insert='floor', scale=0.2
                      '%s mesh %d: RADIUS %s, expected 1.1 x %.6f = %.6f' % (label, me['index'], me['radius'], md,
                                                                           1.1 * md))
     elif radius == 'covers':
-        # at least the computed radius: a model --insert-offset auto re-rooted, whose RADIUS also
-        # covers its keys (not recomputed here)
+        # at least the rest-pose radius: with --radius animated (the default), or for a model
+        # --insert-offset auto re-rooted, RADIUS also covers the keys (not recomputed here)
         pb.check(r >= 1.1 * maxd - 2e-5, '%s: RADIUS %s, less than 1.1 x %.6f = %.6f' % (label, m['radius'], maxd,
                                                                                        1.1 * maxd))
         for me in m['meshes']:
@@ -1168,7 +1168,7 @@ def auto_reroot(spec):
 
 
 class BafOpts:
-    def __init__(self, mat8=True, mat16=True, bmp=True, debug=True, scale=0.2, angles='raw', radius='computed',
+    def __init__(self, mat8=True, mat16=True, bmp=True, debug=True, scale=0.2, angles='raw', radius='animated',
                  insert='auto', palette=None, draw_scale=DRAW_SCALE_DEFAULT):
         self.mat8, self.mat16, self.bmp, self.debug = mat8, mat16, bmp, debug
         self.scale, self.angles, self.radius, self.insert = scale, angles, radius, insert
@@ -1561,6 +1561,8 @@ for _tag, _cli, _o, *_more in [
         ('radius_fixed', ['--radius', '0.5'], BafOpts(radius=0.5)),
         ('radius_stored', ['--radius', 'stored'], BafOpts(radius='stored')),
         ('radius_animated', ['--radius', 'animated'], BafOpts(radius='animated')),
+        # the rest-pose radius (the default until 2 Nov 2026); re-rooted models still cover their keys
+        ('radius_computed', ['--radius', 'computed'], BafOpts(radius='computed')),
         ('no_draw_scale', ['--no-draw-scale'], BafOpts(draw_scale=False)),
         ('insert_floor', ['--insert-offset', 'floor'], BafOpts(insert='floor')),
         ('insert_auto', ['--insert-offset', 'auto'], BafOpts(insert='auto')),
@@ -2161,10 +2163,12 @@ def t_real_default(ctx):
                 continue
             stats['3do'] += 1
             # --insert-offset auto (the default): the lowest point on the floor, after a re-root at
-            # node 0 when node 0 lay above z = 0 (it is then at about z 0, and RADIUS covers the keys)
+            # node 0 when node 0 lay above z = 0 (it is then at about z 0). --radius animated (the
+            # default): every model's RADIUS covers its rest pose and its keys, so at least 1.1 x the
+            # rest-pose reach (the synthetic option tests check the key coverage exactly)
             low = bool(m['nodes']) and abs(float(m['nodes'][0]['pos'][2])) <= 1e-3
             stats['node0_low'] += low
-            check_3do_numbers(m, 'BAF/%s/%s' % (stem, f), pb, radius='covers' if low else 'computed')
+            check_3do_numbers(m, 'BAF/%s/%s' % (stem, f), pb, radius='covers')
             for mat in m['materials']:
                 pb.check(mat in files, 'BAF/%s/%s: MATERIALS names %s, which was not written' % (stem, f, mat))
             for kf, kdata in files.items():

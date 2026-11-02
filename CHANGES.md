@@ -59,7 +59,7 @@ behaviour and refuses it on the command line):
 | `--[no-]draw-scale` | on | also multiply positions by the BAF's own draw scale (header +0xAC, in hundredths); a 3DO or KEY drawn at a scale other than 1 is named `<name>_s<hundredths>` |
 | `--angles raw\|rad2deg` | raw | TPM stores degrees with JK's pitch/yaw/roll; `rad2deg` (the original's disabled experiment) is never right for TPM data and warns |
 | `--insert-offset M` | auto | `auto` (re-root at node 0 when node 0 lies above the origin, then `floor`), `floor` (the lowest point on the floor; props), `node0` (re-root at node 0), `zero`, `legacy` (0,0,0.1), or `X,Y,Z` |
-| `--radius M` | computed | `computed` (rest pose; for a model `auto` or `node0` re-roots, also every key frame), `animated` (every key frame of every model), `stored` (TPM's own), `legacy` (0.1), or a value |
+| `--radius M` | animated | `animated` (rest pose and every key frame of every model), `computed` (rest pose; for a model `auto` or `node0` re-roots, also every key frame), `stored` (TPM's own), `legacy` (0.1), or a value |
 | `--[no-]mat8` | on | retail 8-bit MATs `<base>8.mat`, named by the 3DOs |
 | `--[no-]mat16` | on | 16-bit MATs `<base>16.mat` (OpenJKDF2 and MotS only) |
 | `--[no-]bmp` | on | BMP previews |
@@ -94,9 +94,11 @@ behaviour and refuses it on the command line):
   culls the whole model with this sphere around its origin and never recomputes it, so with
   `--radius computed` a model that `auto` or `node0` re-roots also gets the key-covering radius:
   its origin is then node 0, and the keys reach past the rest-pose radius around it in 164 of the
-  303 retail BAFs. With the defaults, the RADIUS of 294 of the 303 retail models covers every
-  frame of their keys; 9 models that are not re-rooted are outgrown by theirs (4 by more than
-  10%), which `--radius animated` fixes.
+  303 retail BAFs. `--radius animated` is the default (decided 2 Nov 2026): with `computed`, the
+  RADIUS of 294 of the 303 retail models covered every frame of their keys, and 9 models that are
+  not re-rooted were outgrown by theirs (4 by more than 10%). The trade-off: a template without
+  `size=` also collides with the larger RADIUS, so templates should set `size=` (they need it to
+  stand on the floor anyway).
   `--radius stored` uses TPM's model radius and warns when it is smaller than the model (115 retail
   BAFs); mesh radii are then still computed, since TPM's mesh radius is centred elsewhere.
 - **INSERT OFFSET**: `floor` puts the lowest rest-pose point on the floor (right for props).

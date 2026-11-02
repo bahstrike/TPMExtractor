@@ -30,19 +30,22 @@ enum class RadiusMode {
     Fixed,     // write `value` for the model and every mesh. --legacy: Fixed 0.1.
     Computed,  // JK rules: mesh = 1.1 * max |v| over the mesh's (scaled) vertices, measured from
                // the mesh origin; model = 1.1 * max distance from the model origin of any vertex
-               // after the rest-pose hierarchy transform. Default.
+               // after the rest-pose hierarchy transform (and every key frame for a model that
+               // InsertOffsetMode::Auto or Node0 re-roots). The default until 2 Nov 2026.
     Stored,    // the model RADIUS is TPM's own (model header +0x5C) times the effective scale,
                // with a warning when it is smaller than the model; mesh radii stay computed
                // (TPM's mesh radius is a sphere around the mesh's bounding-box centre, not the
                // mesh origin JK culls around).
     Animated,  // as Computed, but the model RADIUS also covers every integer frame of every
                // key in the BAF (animation moves vertices past the rest-pose radius in about
-               // 40% of the retail actors).
+               // 40% of the retail actors). Default: JK culls the whole model with this sphere
+               // and never recomputes it, so a smaller RADIUS drops models that are on screen.
+               // Without size= in its template, a thing also collides with this RADIUS.
 };
 
 struct RadiusOption
 {
-    RadiusMode mode = RadiusMode::Computed;
+    RadiusMode mode = RadiusMode::Animated;
     float value = 0.1f;  // only for Fixed
 };
 
