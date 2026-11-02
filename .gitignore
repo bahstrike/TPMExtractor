@@ -37,3 +37,8 @@ __pycache__/
 *.[wW][aA][vV]
 *.[sS][pP][rR]
 [rR][eE][mM][aA][iI][nN].[hH][eE][xX]
+*.[gG][cC][fF]
+# The dump's archive folders: game text from them uses extensions this repository also uses.
+[bB][iI][gG][lL][aA][bB]/
+[lL][oO][cC][aA][lL][iI][zZ][eE][lL][aA][bB]/
+[vV][oO][iI][cC][eE][lL][aA][bB]/
