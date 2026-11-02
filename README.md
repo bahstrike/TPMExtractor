@@ -91,8 +91,11 @@ file. The tool waits for a key before exiting only with `--pause` (the original 
                        (header +0xAC), as the game does (default on)
 --angles M             raw (default: TPM stores degrees) or rad2deg (never right
                        for TPM data; for experiments)
---insert-offset M      floor (default; props), node0 (re-root at hierarchy node 0
-                       so actors stand on the floor in JK), zero, legacy, or X,Y,Z
+--insert-offset M      auto (default: re-root at hierarchy node 0 when it lies above
+                       the origin, then the lowest point on the floor; people and
+                       creatures then stand on the floor in JK when their template
+                       has size= at most the INSERT OFFSET z - 0.005), floor (the
+                       lowest point; props), node0, zero, legacy, or X,Y,Z
 --radius M             computed (default; rest pose), animated (also covers every
                        key frame), stored (TPM's own), legacy (0.1), or a value
 --[no-]mat8            retail 8-bit MATs, used by the 3DOs (default on)
@@ -139,8 +142,21 @@ in an existing JK level, give that level's colormap (from your own copy of JK) w
 The 16-bit MATs load in OpenJKDF2 and in Mysteries of the Sith, but retail JK cannot be relied on
 to draw them; use the `<base>8.mat` files there.
 
-For actors that stand on the floor (people, creatures), `--insert-offset node0` re-roots the model
-so it stands on the floor in JK instead of hovering. The default, `floor`, suits props.
+**Standing on the floor.** JK never draws a model shifted by its `INSERT OFFSET`; it only places
+things with it. A thing with physics that stands on a floor (actors, players, anything with
+gravity) keeps its origin `max(INSERT OFFSET z, size + 0.005)` above the floor, where `size` is
+the template's `size=` (without `size=`, the 3DO's `RADIUS`; `movesize=` does not count for actors
+and players), unless the template sets `height=`. TPM's people and creatures stand on their
+origin, so with `--insert-offset floor` (right for props) they would hover in JK, by about their
+own height when the template has no `size=`. The default, `--insert-offset auto`, re-roots every
+model whose hierarchy node 0 lies above its origin at node 0 (on TPM's people, the pelvis or a
+root node at about hip height), as `--insert-offset node0` does, and then puts the lowest point on
+the floor, as `floor` does: a person then hangs node 0's height below its origin, and `INSERT
+OFFSET` z is that height. Give the template a `size=` of at most `INSERT OFFSET z - 0.005`; with a
+larger `size=`, or none, it still floats. `auto` re-roots by node 0's height rounded to 1/1000 of
+a model unit, so BAFs that share a key still write identical keys (`node0` re-roots by the exact
+height). On a retail disc `auto` re-roots 250 of the 303 models; the others have node 0 at their
+origin and get exactly the `floor` output.
 
 ## What `--legacy` does
 
@@ -177,7 +193,9 @@ The summary; [CHANGES.md](CHANGES.md) has the details.
   - the real BAF layout is read, so the one colormap-less BAF on the retail disc gets its model;
   - computed 3DO `RADIUS` values (JK's rules) instead of the placeholder 0.1, optionally also
     covering every animation frame (`--radius animated`);
-  - `INSERT OFFSET` on the floor for props, or a re-root for actors (`--insert-offset node0`);
+  - a re-root at hierarchy node 0 for models whose node 0 lies above their origin, then the lowest
+    point on the floor (`INSERT OFFSET`), so that people and creatures stand on the floor in JK
+    (`--insert-offset auto`, the default; see "Standing on the floor");
   - positions multiplied by each BAF's own draw scale, as the game draws it (`--no-draw-scale`
     turns this off);
   - the real hierarchy node types (so partial-body animations blend as authored), perspective

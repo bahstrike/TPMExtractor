@@ -348,7 +348,7 @@ static void test_options()
     CHECK(parse({"disc", "dump"}, p, err));
     const Options& o = p.opts;
     CHECK(!o.legacy && o.scale == 0.2f && o.draw_scale && o.angles == AngleMode::Raw);
-    CHECK(o.insert_offset.mode == InsertOffsetMode::Floor && o.radius.mode == RadiusMode::Computed);
+    CHECK(o.insert_offset.mode == InsertOffsetMode::Auto && o.radius.mode == RadiusMode::Computed);
     CHECK(o.mat8 && o.mat16 && o.bmp && o.palette.empty() && o.debug_dumps && !o.keep_decompressed);
     CHECK(!o.pause && o.verbose == 0 && p.positional.size() == 2 && !p.pause_explicit);
 
@@ -374,6 +374,10 @@ static void test_options()
     CHECK(parse({"--insert-offset", "1,2.5,-3"}, p, err) && p.opts.insert_offset.mode == InsertOffsetMode::Fixed &&
           p.opts.insert_offset.y == 2.5f && p.opts.insert_offset.z == -3.0f);
     CHECK(parse({"--insert-offset=node0"}, p, err) && p.opts.insert_offset.mode == InsertOffsetMode::Node0);
+    CHECK(parse({"--insert-offset=floor"}, p, err) && p.opts.insert_offset.mode == InsertOffsetMode::Floor);
+    CHECK(parse({"--insert-offset", "auto"}, p, err) && p.opts.insert_offset.mode == InsertOffsetMode::Auto);
+    CHECK(describe(Options()).find("insert-offset=auto") != std::string::npos);
+    CHECK(!parse({"--legacy", "--insert-offset=auto", "a", "b"}, p, err));
     CHECK(parse({"--insert-offset=zero"}, p, err) && p.opts.insert_offset.mode == InsertOffsetMode::Fixed &&
           p.opts.insert_offset.z == 0.0f);
     CHECK(parse({"--insert-offset=legacy"}, p, err) && p.opts.insert_offset.z == 0.1f);

@@ -180,7 +180,9 @@ bool parse_args(int argc, const char* const* argv, ParsedArgs& out, std::string&
             if (!take_value())
                 return false;
             InsertOffsetOption io;
-            if (value == "floor") {
+            if (value == "auto") {
+                io.mode = InsertOffsetMode::Auto;
+            } else if (value == "floor") {
                 io.mode = InsertOffsetMode::Floor;
             } else if (value == "node0") {
                 io.mode = InsertOffsetMode::Node0;
@@ -195,7 +197,7 @@ bool parse_args(int argc, const char* const* argv, ParsedArgs& out, std::string&
                 if (c2 == std::string::npos || value.find(',', c2 + 1) != std::string::npos ||
                     !parse_float(value.substr(0, c1), io.x) || !parse_float(value.substr(c1 + 1, c2 - c1 - 1), io.y) ||
                     !parse_float(value.substr(c2 + 1), io.z)) {
-                    err = "--insert-offset must be floor, zero, node0, legacy or X,Y,Z, got \"" + value + "\"";
+                    err = "--insert-offset must be auto, floor, node0, zero, legacy or X,Y,Z, got \"" + value + "\"";
                     return false;
                 }
                 io.mode = InsertOffsetMode::Fixed;
@@ -290,8 +292,11 @@ std::string usage_text(const char* program_name)
            "                         (header +0xAC), as the game does (default on)\n"
            "  --angles M             raw (default: TPM stores degrees) or rad2deg (never right\n"
            "                         for TPM data; for experiments)\n"
-           "  --insert-offset M      floor (default; props), node0 (re-root at hierarchy node 0\n"
-           "                         so actors stand on the floor in JK), zero, legacy, or X,Y,Z\n"
+           "  --insert-offset M      auto (default: re-root at hierarchy node 0 when it lies above\n"
+           "                         the origin, then the lowest point on the floor; people and\n"
+           "                         creatures then stand on the floor in JK when their template\n"
+           "                         has size= at most the INSERT OFFSET z - 0.005), floor (the\n"
+           "                         lowest point; props), node0, zero, legacy, or X,Y,Z\n"
            "  --radius M             computed (default; rest pose), animated (also covers every\n"
            "                         key frame), stored (TPM's own), legacy (0.1), or a value\n"
            "  --[no-]mat8            retail 8-bit MATs, used by the 3DOs (default on)\n"
@@ -315,6 +320,7 @@ std::string describe(const Options& o)
 {
     std::string io;
     switch (o.insert_offset.mode) {
+    case InsertOffsetMode::Auto: io = "auto"; break;
     case InsertOffsetMode::Floor: io = "floor"; break;
     case InsertOffsetMode::Node0: io = "node0"; break;
     case InsertOffsetMode::Fixed:

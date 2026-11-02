@@ -31,6 +31,8 @@ struct BafExtras
     // about 40% of the retail actors. Default off; RadiusMode::Animated turns it on, and so does
     // InsertOffsetMode::Node0 with RadiusMode::Computed (the re-rooted origin is the pelvis, and
     // the keys reach past the rest-pose RADIUS around it in 164 of the 303 retail BAFs).
+    // InsertOffsetMode::Auto with RadiusMode::Computed covers the keys of each model it re-roots,
+    // whatever this flag says.
     bool animated_radius = false;
 };
 

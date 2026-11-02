@@ -842,6 +842,17 @@ def check_3do_numbers(m, label, pb, radius='computed', insert='floor', scale=0.2
             pb.check(mr >= md - 4e-6 and close(mr, 1.1 * md),
                      '%s mesh %d: RADIUS %s, expected 1.1 x %.6f = %.6f' % (label, me['index'], me['radius'], md,
                                                                           1.1 * md))
+    elif radius == 'covers':
+        # at least the computed radius: a model --insert-offset auto re-rooted, whose RADIUS also
+        # covers its keys (not recomputed here)
+        pb.check(r >= 1.1 * maxd - 2e-5, '%s: RADIUS %s, less than 1.1 x %.6f = %.6f' % (label, m['radius'], maxd,
+                                                                                       1.1 * maxd))
+        for me in m['meshes']:
+            md = max((math.sqrt(sum(c * c for c in _f(v[:3]))) for v in me['verts']), default=0.0)
+            mr = float(me['radius'] or 'nan')
+            pb.check(mr >= md - 4e-6 and close(mr, 1.1 * md),
+                     '%s mesh %d: RADIUS %s, expected 1.1 x %.6f = %.6f' % (label, me['index'], me['radius'], md,
+                                                                          1.1 * md))
     elif radius == 'stored':
         want = mf.f32(mf.f32(stored_radius) * scale)
         pb.check(close(r, want), '%s: RADIUS %s, expected the stored radius x scale = %.6f' % (label, m['radius'],
@@ -885,16 +896,21 @@ def scaled_same(a, b, fac):
         return False
 
 
-def compare_key(d, l, label, pb, fac=None):
+def compare_key(d, l, label, pb, fac=None, node0_dz=None):
     """Default-mode .key text against --legacy: identical, except that with a draw scale (fac)
-    the positions and position deltas (columns 4-6 of the entry and delta rows) scale by fac."""
+    the positions and position deltas (columns 4-6 of the entry and delta rows) scale by fac, and
+    that for a model re-rooted at node 0 (node0_dz: how far node 0 was lowered, in default-mode
+    units) node 0's entry z positions are that much lower."""
     if d == l:
         return
     dl, ll = d.split(b'\r\n'), l.split(b'\r\n')
     if not pb.check(len(dl) == len(ll), '%s: %d lines, --legacy %d' % (label, len(dl), len(ll))):
         return
     bad = 0
+    node = None
     for x, y in zip(dl, ll):
+        if y.startswith(b'NODE ') and y[5:].isdigit():
+            node = int(y[5:])
         if x == y:
             continue
         if x.startswith(b'JOINTS ') and y.startswith(b'JOINTS ') and x[7:].isdigit() and y[7:].isdigit():
@@ -904,6 +920,15 @@ def compare_key(d, l, label, pb, fac=None):
                 bad += 1
             continue
         tx, ty = x.decode('latin-1').split('\t'), y.decode('latin-1').split('\t')
+        if node0_dz is not None and node == 0 and len(tx) == 9 and len(ty) == 9 and ty[0].endswith(':'):
+            try:
+                want = float(ty[5]) * (fac or 1.0) - node0_dz
+                z_ok = abs(float(tx[5]) - want) <= 3.5e-6 + 1e-6 * abs(want)
+            except ValueError:
+                z_ok = False
+            if tx[:3] != ty[:3] or tx[6:] != ty[6:] or not scaled_same(tx[3:5], ty[3:5], fac) or not z_ok:
+                bad += 1
+            continue
         if len(tx) != 9 or len(ty) != 9 or tx[:3] != ty[:3] or tx[6:] != ty[6:] or not scaled_same(tx[3:6], ty[3:6], fac):
             bad += 1
     pb.check(bad == 0, '%s: %d lines differ from --legacy beyond the draw scale' % (label, bad))
@@ -1132,9 +1157,19 @@ def scaled_name(name, steps):
     return stem + '_s%03d' % steps + dot + ext if dot else name + '_s%03d' % steps
 
 
+def auto_reroot(spec):
+    """--insert-offset auto (the default): the height a fixture's model is re-rooted by, node 0's
+    z rounded to 1/1000 (baf.cpp kAutoRerootSteps), or 0.0 when node 0 does not lie above z = 0.
+    The INSERT OFFSET is then the floor of the re-rooted model."""
+    z = mf.f32(spec['model']['nodes'][0]['pos'][2]) if spec['model']['nodes'] else 0.0
+    if not z > 0 or math.isinf(z):
+        return 0.0
+    return mf.f32(round(z * 1000.0) / 1000.0)
+
+
 class BafOpts:
     def __init__(self, mat8=True, mat16=True, bmp=True, debug=True, scale=0.2, angles='raw', radius='computed',
-                 insert='floor', palette=None, draw_scale=DRAW_SCALE_DEFAULT):
+                 insert='auto', palette=None, draw_scale=DRAW_SCALE_DEFAULT):
         self.mat8, self.mat16, self.bmp, self.debug = mat8, mat16, bmp, debug
         self.scale, self.angles, self.radius, self.insert = scale, angles, radius, insert
         self.draw_scale = draw_scale    # --[no-]draw-scale
@@ -1170,7 +1205,9 @@ def check_baf_default(files, spec, data, o, label, pb):
     # for node0, under names that carry a draw scale other than 1
     scale = effective_scale(spec, o.scale, o.draw_scale)
     steps = draw_scale_steps(spec, o.draw_scale)
-    mspec = mf.rerooted(spec) if o.insert == 'node0' else spec
+    reroot = auto_reroot(spec) if o.insert == 'auto' else 0.0
+    insert = 'floor' if o.insert == 'auto' else o.insert
+    mspec = mf.rerooted(spec) if o.insert == 'node0' else mf.rerooted(spec, reroot) if reroot > 0 else spec
     model_ref = legacy_baf_files(mf.build_baf(mspec)[0], scale=scale, angles=o.angles, fallback_palette=fallback,
                                  padded_bmp=True, mat16=o.mat16, bmp=o.bmp, debug_dumps=o.debug)
     variant = 'legacy read order'
@@ -1267,8 +1304,16 @@ def check_baf_default(files, spec, data, o, label, pb):
         node0 = (0.0, 0.0, mf.f32(mf.f32(spec['model']['nodes'][0]['pos'][2]) * scale))
         keys = [parse_key_text(files[k]) for k in sorted(files) if k.endswith('.key')]
         key_names = [k['name'].lower() for k in spec.get('keys', [])]
-        check_3do_numbers(d, '%s/%s' % (label, n), pb, o.radius, o.insert, scale, spec['model']['radius'], node0,
+        # a model auto re-roots gets node0's radius: with --radius computed it covers the keys too
+        radius = 'animated' if reroot > 0 and o.radius == 'computed' else o.radius
+        check_3do_numbers(d, '%s/%s' % (label, n), pb, radius, insert, scale, spec['model']['radius'], node0,
                           [k for k in keys if k], keys_complete=len(set(key_names)) == len(key_names))
+        if reroot > 0 and spec['file'] == 'stand.baf':
+            # stands on its origin: re-rooted, it hangs node 0's height below its origin, which is
+            # where JK keeps the origin of a standing thing (template size= at most that - 0.005)
+            pb.check(close(float(d['insert'][2]), mf.f32(reroot * scale), abs_=2e-6),
+                     '%s/%s: INSERT OFFSET z %s, expected node 0\'s height %.6f: it would not stand on the floor in JK'
+                     % (label, n, d['insert'][2], mf.f32(reroot * scale)))
         if o.mat8 or o.mat16:       # with neither, the 3DO names <base>16.mat files that are not written
             for mat in d['materials']:
                 pb.check(mat in files, '%s/%s: MATERIALS names %s, which was not written' % (label, n, mat))
@@ -1517,6 +1562,8 @@ for _tag, _cli, _o, *_more in [
         ('radius_stored', ['--radius', 'stored'], BafOpts(radius='stored')),
         ('radius_animated', ['--radius', 'animated'], BafOpts(radius='animated')),
         ('no_draw_scale', ['--no-draw-scale'], BafOpts(draw_scale=False)),
+        ('insert_floor', ['--insert-offset', 'floor'], BafOpts(insert='floor')),
+        ('insert_auto', ['--insert-offset', 'auto'], BafOpts(insert='auto')),
         ('insert_zero', ['--insert-offset', 'zero'], BafOpts(insert='zero')),
         # the re-rooted origin is node 0: the computed RADIUS then also covers every key frame
         ('insert_node0', ['--insert-offset', 'node0'], BafOpts(insert='node0', radius='animated')),
@@ -2067,7 +2114,7 @@ def t_real_default(ctx):
     run_pb = Problems()
     sound_run(r, run_pb)
     pb.raw += run_pb.items
-    stats = {'cmp': 0, 'mat8': 0, '3do': 0, 'bafs': 0, 'key3do': 0}
+    stats = {'cmp': 0, 'mat8': 0, '3do': 0, 'bafs': 0, 'key3do': 0, 'node0_low': 0}
     for stem in real_baf_dirs(out):
         stats['bafs'] += 1
         d = os.path.join(out, 'BAF', stem)
@@ -2113,7 +2160,11 @@ def t_real_default(ctx):
                 stats['key3do'] += 1
                 continue
             stats['3do'] += 1
-            check_3do_numbers(m, 'BAF/%s/%s' % (stem, f), pb)
+            # --insert-offset auto (the default): the lowest point on the floor, after a re-root at
+            # node 0 when node 0 lay above z = 0 (it is then at about z 0, and RADIUS covers the keys)
+            low = bool(m['nodes']) and abs(float(m['nodes'][0]['pos'][2])) <= 1e-3
+            stats['node0_low'] += low
+            check_3do_numbers(m, 'BAF/%s/%s' % (stem, f), pb, radius='covers' if low else 'computed')
             for mat in m['materials']:
                 pb.check(mat in files, 'BAF/%s/%s: MATERIALS names %s, which was not written' % (stem, f, mat))
             for kf, kdata in files.items():
@@ -2123,8 +2174,9 @@ def t_real_default(ctx):
                              'BAF/%s/%s: JOINTS %s, fewer than the %d hierarchy nodes of %s'
                              % (stem, kf, km.group(1).decode() if km else '(none)', len(m['nodes']), f))
     levels = sum(1 for k in os.listdir(os.path.join(out, 'LEVEL'))) if os.path.isdir(os.path.join(out, 'LEVEL')) else 0
-    print('    default mode: %d BAF folders, %d CMPs, %d 8-bit MATs, %d model 3DOs (%d key-format), %d levels'
-          % (stats['bafs'], stats['cmp'], stats['mat8'], stats['3do'], stats['key3do'], levels))
+    print('    default mode: %d BAF folders, %d CMPs, %d 8-bit MATs, %d model 3DOs (%d key-format, %d with node 0 '
+          'at z 0), %d levels' % (stats['bafs'], stats['cmp'], stats['mat8'], stats['3do'], stats['key3do'],
+                                  stats['node0_low'], levels))
     pb.check(stats['bafs'] > 0 and stats['3do'] > 0, 'no BAF output to check')
     pb.done(summary=True)
 
@@ -2157,6 +2209,26 @@ def t_real_compare(ctx):
         s = steps.get(stem, 100)
         return None if s == 100 else s / 100.0
 
+    # --insert-offset auto re-roots a model at node 0 when node 0 lies above z = 0: how far node 0
+    # was lowered in each such BAF (default-mode units), from the two 3DOs
+    rerooted = {}
+    for stem in real_baf_dirs(dout):
+        ld, dd = os.path.join(lout, 'BAF', stem), os.path.join(dout, 'BAF', stem)
+        legacy_files = set(os.listdir(ld)) if os.path.isdir(ld) else set()
+        renamed = {scaled_name(f, steps.get(stem, 100)): f for f in legacy_files if f.endswith('.3do')}
+        for f in os.listdir(dd):
+            lf = renamed.get(f, f)
+            if not f.endswith('.3do') or lf not in legacy_files:
+                continue
+            try:
+                a, b = parse_3do(digest(os.path.join(dd, f))), parse_3do(digest(os.path.join(ld, lf)))
+            except ValueError:
+                continue                      # reported by the comparison below
+            if a['kind'] == 'model' and b['kind'] == 'model' and a['nodes'] and b['nodes']:
+                dz = float(b['nodes'][0]['pos'][2]) * (fac_of(stem) or 1.0) - float(a['nodes'][0]['pos'][2])
+                if dz > 1e-5:
+                    rerooted[stem] = dz
+
     same = changed = palette_appended = 0
     changed_kinds = {}
     for d, dirs, files in os.walk(lout):
@@ -2172,7 +2244,7 @@ def t_real_compare(ctx):
                 q = os.path.join(dout, 'BAF', stem, scaled_name(f, steps.get(stem, 100)))
             if rel.startswith('BAF/') and low.endswith('.key'):
                 if os.path.isfile(q):
-                    compare_key(digest(q), digest(p), rel, pb, fac_of(stem))
+                    compare_key(digest(q), digest(p), rel, pb, fac_of(stem), rerooted.get(stem))
                     same += 1
                     continue
             if not os.path.isfile(q):
@@ -2205,6 +2277,10 @@ def t_real_compare(ctx):
                 if a and b and a['kind'] == 'model' and b['kind'] == 'model':
                     # --legacy lists <base>16.mat, default mode <base>8.mat
                     names = [x[:-6] + '8.mat' if x.endswith('16.mat') else x for x in b['materials']]
+                    if stem in rerooted:      # node 0 lowered by the re-root (checked through the keys)
+                        f0 = fac_of(stem)
+                        b['nodes'][0]['pos'] = b['nodes'][0]['pos'][:2] + [
+                            a['nodes'][0]['pos'][2] if f0 is None else '%.9f' % (float(a['nodes'][0]['pos'][2]) / f0)]
                     compare_3do(a, b, 'BAF/%s/%s' % (stem, f), pb, names, fac=fac_of(stem))
             elif lf not in legacy_files:
                 # a colormap-less BAF also gets the colormap its 8-bit MATs index

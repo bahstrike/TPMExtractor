@@ -1446,6 +1446,11 @@ const double kMat8RemapWarnError = 48.0;
 const uint32_t kAnimatedRadiusMaxFramesPerKey = 4096;
 const uint64_t kAnimatedRadiusBudget = 400000000ull;
 
+// InsertOffsetMode::Auto re-roots a model by node 0's z rounded to 1/kAutoRerootSteps of a model
+// unit: BAFs that share keys store node 0 heights that differ in their last bits, which would
+// otherwise make their re-rooted keys differ in the last printed digit under the same name.
+const double kAutoRerootSteps = 1000.0;
+
 struct Vec3f
 {
 	float x = 0, y = 0, z = 0;
@@ -2269,6 +2274,19 @@ void extent(const std::vector<BafNode>& nodes, const ModelOut& g, const std::vec
 	}
 }
 
+// InsertOffsetMode::Auto: how far a model is re-rooted, node 0's z rounded to
+// 1/kAutoRerootSteps (0: not re-rooted, node 0 does not lie above z = 0).
+float auto_reroot_height(const Baf& b)
+{
+	if (!b.model_parsed || b.model.nodes.empty())
+		return 0.0f;
+	const float z = b.model.nodes[0].pos.z;
+	if (!(z > 0.0f) || !std::isfinite(z))
+		return 0.0f;
+	const float r = (float)(std::round((double)z * kAutoRerootSteps) / kAutoRerootSteps);
+	return r > 0.0f && std::isfinite(r) ? r : 0.0f;
+}
+
 // The rest pose as written.
 void rest_pose(const ModelOut& g, std::vector<Vec3d>& pos, std::vector<Vec3d>& rot)
 {
@@ -2361,6 +2379,13 @@ void init_model_out(const Baf& b, const Options& opts, const BafExtras& extras, 
 	g.scale = opts.scale * g.draw_scale;
 	g.reroot = opts.insert_offset.mode == InsertOffsetMode::Node0 && b.model_parsed && !b.model.nodes.empty();
 	g.reroot_z = g.reroot ? b.model.nodes[0].pos.z : 0.0f;
+	if (opts.insert_offset.mode == InsertOffsetMode::Auto)
+	{
+		// re-rooted as Node0 when node 0 lies above z = 0 (by its rounded height); the INSERT
+		// OFFSET is then Floor's for the re-rooted model (compute_model())
+		g.reroot_z = auto_reroot_height(b);
+		g.reroot = g.reroot_z > 0.0f;
+	}
 }
 
 // "<name>" with the draw-scale suffix inserted before its extension ("a.key" -> "a_s110.key").
@@ -2417,7 +2442,11 @@ void compute_model(const Baf& b, const Options& opts, const BafExtras& extras, M
 
 	double extent_for_radius = g.rest_extent;
 	const bool computed = opts.radius.mode == RadiusMode::Computed || opts.radius.mode == RadiusMode::Animated;
-	if (computed && (extras.animated_radius || opts.radius.mode == RadiusMode::Animated))
+	// A model InsertOffsetMode::Auto re-roots gets the radius --insert-offset node0 gives it: the
+	// computed RADIUS then covers the keys too (see process_baf()).
+	const bool animated = extras.animated_radius || opts.radius.mode == RadiusMode::Animated ||
+		(opts.radius.mode == RadiusMode::Computed && opts.insert_offset.mode == InsertOffsetMode::Auto && g.reroot);
+	if (computed && animated)
 	{
 		bool truncated = false;
 		const double a = animated_extent(b, g, opts, work, truncated);
@@ -2469,6 +2498,12 @@ void compute_model(const Baf& b, const Options& opts, const BafExtras& extras, M
 		break;
 	case InsertOffsetMode::Node0:
 		g.insert[2] = (double)(g.reroot_z * g.scale);
+		break;
+	case InsertOffsetMode::Auto:
+		// the lowest point of the (possibly re-rooted) model on the floor
+		g.insert[2] = g.any_vertex ? -g.zmin : 0.0;
+		log::verbose("%s: insert offset: %s\n", b.file.c_str(), g.reroot ? format("re-rooted at node 0 by %f, then "
+			"the lowest point", (double)g.reroot_z).c_str() : "the lowest point");
 		break;
 	}
 }
@@ -3204,7 +3239,8 @@ bool process_baf(const std::string& baf_path, const std::string& out_dir, const 
 	// The computed RADIUS also covers the keys with --insert-offset node0: the re-rooted model's
 	// origin is node 0 (the pelvis of TPM's people), and their keys swing limbs and weapons past
 	// the rest-pose RADIUS around it (in 164 of the 303 retail BAFs), so JK, which culls the whole
-	// model with that sphere, would drop actors while they are on screen.
+	// model with that sphere, would drop actors while they are on screen. --insert-offset auto
+	// does the same for each model it re-roots (compute_model()).
 	extras.animated_radius = opts.radius.mode == RadiusMode::Animated ||
 		(opts.radius.mode == RadiusMode::Computed && opts.insert_offset.mode == InsertOffsetMode::Node0);
 	return process_baf(baf_path, out_dir, opts, fallback_palette, extras);

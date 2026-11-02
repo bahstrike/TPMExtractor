@@ -1101,18 +1101,37 @@ def baf_fixtures():
                   'nodes': [_node('node_a', 0, -1, 0, -1, -1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))]},
         'keys': [], 'extras': [],
     }
-    return [(s['file'], s) for s in (box, rig, stub, leaf, bare)]
+    # Stands on its origin with hierarchy node 0 above it, as the people and creatures of the
+    # retail disc are built: --insert-offset auto (the default) re-roots it at node 0, so it hangs
+    # node 0's height below its origin and stands on the floor in JK.
+    stand = {
+        'file': 'stand.baf',
+        'colormap': {'name': 'stand.cmp', 'palette': PAL_B},
+        'materials': [{'name': 'stand.mat', 'type': 2,
+                       'textures': [{'w': 4, 'h': 4, 'transparent': 0, 'mips': [tex_gradient(4, 4, 20, 90)]}]}],
+        'model': {'name': 'stand.3do', 'radius': 0.9, 'insert': (0.0, 0.0, 0.5),
+                  'meshes': [_box_mesh('body', (0.0, 0.0, -0.1), (0.2, 0.15, 0.4), [0]),
+                             _box_mesh('top', (0.0, 0.0, 0.1), (0.1, 0.1, 0.1), [0])],
+                  'nodes': [_node('node_body', 0, -1, 1, 1, -1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.5), (0.0, 0.0, 0.0)),
+                            _node('node_top', 1, 0, 0, -1, -1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.3), (0.0, 0.0, 0.0))]},
+        'keys': [{'name': 'sway.key', 'frames': 4,
+                  'joints': [{'name': 'node_body', 'node': 0, 'entries': _entries(2, 81, frames=(0, 2))},
+                             {'name': 'node_top', 'node': 1, 'entries': _entries(2, 82, frames=(0, 2))}]}],
+        'extras': [],
+    }
+    return [(s['file'], s) for s in (box, rig, stub, leaf, bare, stand)]
 
 
-def rerooted(spec):
+def rerooted(spec, by=None):
     """The same BAF with hierarchy node 0's z moved into the insert offset (the re-root of
     --insert-offset node0): node 0's z position becomes 0 and node 0's key positions lose node
-    0's z (float subtraction, before scaling); deltas and every other node stay."""
+    0's z (float subtraction, before scaling); deltas and every other node stay. `by`: re-root by
+    this height instead (--insert-offset auto rounds node 0's z), node 0 keeping the difference."""
     s = dict(spec)
     model = dict(spec['model'])
     nodes = [dict(n) for n in model['nodes']]
-    z0 = f32(nodes[0]['pos'][2])
-    nodes[0]['pos'] = (nodes[0]['pos'][0], nodes[0]['pos'][1], f32(z0 - z0))
+    z0 = f32(nodes[0]['pos'][2]) if by is None else f32(by)
+    nodes[0]['pos'] = (nodes[0]['pos'][0], nodes[0]['pos'][1], f32(f32(nodes[0]['pos'][2]) - z0))
     model['nodes'] = nodes
     s['model'] = model
     keys = []

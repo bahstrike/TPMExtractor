@@ -46,19 +46,41 @@ struct RadiusOption
     float value = 0.1f;  // only for Fixed
 };
 
+// How retail JK uses a 3DO's INSERT OFFSET (the engine code OpenJKDF2 decompiled): JK never
+// draws the model shifted by it; it only places things with it.
+//   - A thing created at another thing (COG CreateThing at a marker) gets its origin at the
+//     marker plus the difference of the two insert offsets.
+//   - A thing with physics standing on a floor (actors, players, anything with gravity) keeps
+//     its origin max(insert offset z, size + 0.005) above the floor, where size is the
+//     template's size= (the model's RADIUS when the template has no size=; movesize= does not
+//     count for actors and players), unless the template sets height=.
+// So the model's lowest point, -insert offset z below the origin, touches the floor only when
+// insert offset z >= size + 0.005.
 enum class InsertOffsetMode {
     Fixed,  // write x, y, z. --legacy: Fixed (0, 0, 0.1), printed as "0 0 0.100000 #dunno".
-    Floor,  // (0, 0, -zmin): zmin = lowest vertex z in model space at rest pose (scaled), so
-            // a model standing on the floor touches it in JK. Default; right for props.
-    Node0,  // re-root at hierarchy node 0 so actors stand on the floor in JK: node 0's z moves
-            // to 0 in the HIERARCHYDEF and in node 0's KEY entries, and INSERT OFFSET becomes
-            // (0, 0, node0.z * scale). (Node 0's position as the insert offset alone would leave
-            // TPM actors hovering, since they stand on their origin.)
+    Floor,  // (0, 0, -zmin): zmin = lowest vertex z in model space at rest pose (scaled). The
+            // model touches the floor where JK places it by the insert offset alone, and on a
+            // physics thing only when -zmin >= size + 0.005. TPM actors stand on their origin
+            // (zmin is about 0), so with this mode they hover in JK by size + 0.005, or by about
+            // their own height when the template has no size=. Right for props.
+    Node0,  // re-root at hierarchy node 0: node 0's z moves to 0 in the HIERARCHYDEF and in node
+            // 0's KEY entries (the model now hangs node0.z * scale below its origin), and INSERT
+            // OFFSET becomes (0, 0, node0.z * scale). An actor that stands on its origin then
+            // stands on the floor in JK when its template has size= at most node0.z * scale -
+            // 0.005. Use it for people and creatures. (Node 0's position as the insert offset
+            // without the re-root would leave them hovering.)
+    Auto,   // per model: when hierarchy node 0 lies above z = 0, re-root at node 0 as Node0 does,
+            // by node 0's z rounded to 1/1000 of a model unit (BAFs that share keys then keep
+            // byte-identical keys), and give the re-rooted model Floor's insert offset (0, 0,
+            // -zmin); every other model gets Floor. A model that stands on its origin, as TPM's
+            // people and creatures do, then hangs node 0's height below its origin and stands on
+            // the floor in JK (template size= at most INSERT OFFSET z - 0.005), and no model's
+            // lowest point ends up below the floor. Default.
 };
 
 struct InsertOffsetOption
 {
-    InsertOffsetMode mode = InsertOffsetMode::Floor;
+    InsertOffsetMode mode = InsertOffsetMode::Auto;
     float x = 0.0f, y = 0.0f, z = 0.0f;  // only for Fixed
 };
 

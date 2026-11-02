@@ -58,7 +58,7 @@ behaviour and refuses it on the command line):
 | `--scale F` | 0.2 | scale for 3DO/KEY positions (Strike's world scale) |
 | `--[no-]draw-scale` | on | also multiply positions by the BAF's own draw scale (header +0xAC) |
 | `--angles raw\|rad2deg` | raw | TPM stores degrees with JK's pitch/yaw/roll; `rad2deg` (the original's disabled experiment) is never right for TPM data and warns |
-| `--insert-offset M` | floor | `floor` (props), `node0` (re-root actors), `zero`, `legacy` (0,0,0.1), or `X,Y,Z` |
+| `--insert-offset M` | auto | `auto` (re-root at node 0 when node 0 lies above the origin, then `floor`), `floor` (the lowest point on the floor; props), `node0` (re-root at node 0), `zero`, `legacy` (0,0,0.1), or `X,Y,Z` |
 | `--radius M` | computed | `computed` (rest pose), `animated` (also every key frame), `stored` (TPM's own), `legacy` (0.1), or a value |
 | `--[no-]mat8` | on | retail 8-bit MATs `<base>8.mat`, named by the 3DOs |
 | `--[no-]mat16` | on | 16-bit MATs `<base>16.mat` (OpenJKDF2 and MotS only) |
@@ -92,7 +92,22 @@ behaviour and refuses it on the command line):
 - **INSERT OFFSET**: `floor` puts the lowest rest-pose point on the floor (right for props).
   `node0` re-roots the model at hierarchy node 0: node 0's z moves to 0 in the hierarchy and in
   node 0's KEY entries, and INSERT OFFSET becomes (0, 0, node0.z x scale), so actors stand on the
-  floor in JK instead of hovering.
+  floor in JK instead of hovering. Retail JK (code decompiled by OpenJKDF2) never draws a model
+  shifted by its INSERT OFFSET: a thing with physics standing on a floor keeps its origin
+  max(INSERT OFFSET z, size + 0.005) above it, `size` being the template's `size=` (the 3DO's
+  RADIUS without one). TPM's people and creatures stand on their origin, so with `floor` they
+  hover (by about a fifth of their height with a body-sized `size=` on the retail disc, by more
+  than their height without `size=`); with `node0` they stand on the floor when the template's
+  `size=` is at most INSERT OFFSET z - 0.005. The README and `--help` say so.
+  The default is `auto`: a model whose node 0 lies above z = 0 is re-rooted as with `node0`, by
+  node 0's height rounded to 1/1000 of a model unit (BAFs that share keys store heights that differ
+  in their last bits; the rounded height keeps their re-rooted keys byte-identical), and its
+  INSERT OFFSET is then the floor of the re-rooted model; other models get exactly `floor`. With
+  `--radius computed`, a re-rooted model's RADIUS covers its keys, as with `node0`. On the retail
+  disc `auto` re-roots 250 of the 303 models; the 133 two-legged rigs stand on the floor with a
+  body-sized `size=` (lowest point within 5% of their height of the floor in 130, none sunk into it),
+  where `floor` left 132 hovering and `node0` sank one below the floor. No key or model name that
+  several BAFs share gets different contents.
 - **Draw scale**: positions (vertices, hierarchy positions and pivots, KEY positions and position
   deltas) are multiplied by `--scale` x the BAF's draw scale, as the game draws the actor. This
   changes 134 retail BAFs, 54 of them by more than 1e-4 (`--no-draw-scale` turns it off).
