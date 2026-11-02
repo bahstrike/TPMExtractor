@@ -213,8 +213,19 @@ behaviour and refuses it on the command line):
   go outside the source tree and are deleted.
 - Unit tests: `unit_layer` (platform, BMP, reader, options), `unit_textout` (number formatting),
   `unit_jkout` (MAT and CMP encoders), `unit_b3d_decompress` (the level decoder).
-- Fuzz targets `tests/fuzz_*.cpp` (LAB, B3D, CMP parsers) with libFuzzer (clang) or a replay
-  driver (`-DTPMX_FUZZ=ON`).
+- Fuzz targets `tests/fuzz_*.cpp` with libFuzzer (clang) or a replay driver (`-DTPMX_FUZZ=ON`):
+  in memory the LAB directory, the B3D section walk and LZSS decoder, and CMPs; and through the
+  tool's file entry points, BAF files (`fuzz_baf`: both parsers and every BAF writer, in
+  `--legacy` and default mode with the BAF options), levels (`fuzz_b3d_file`: default,
+  `--keep-decompressed`, `--legacy`), LAB extraction (`fuzz_lab_file`) and `.Z` extraction
+  (`fuzz_z`). The file-level targets run in a scratch folder of their own and fail when anything
+  is written outside the output folder. With clang every target is built with coverage
+  instrumentation (`-fsanitize=fuzzer-no-link`), so libFuzzer is guided by the tool's code, not
+  only by the target's. `make_fixtures.py` writes seeds for each target (including damaged and
+  hostile-name inputs), and `ctest -L fuzz` runs every target briefly on them. Seeded only with
+  synthetic files, `fuzz_baf` finds the signed overflow in the legacy mipmap size (fixed) within
+  about 1,200 inputs.
+- Log level -2 (silent: warnings and errors are counted, not printed), for the fuzz targets.
 - `make check` and `ctest` run everything; real data is never part of the repository.
 
 ### Files

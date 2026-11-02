@@ -1,7 +1,7 @@
 // TPMExtractor fork - unit tests of the foundation layer: platform (paths, safe output names,
 // case-insensitive resolution, directories, NTFS enumeration order, files), the BMP writer
 // (byte-identical to a replica of the original's code), BinReader, TextWriter and format(),
-// option parsing and the --legacy profile, palettes and the legacy colormap.
+// option parsing and the --legacy profile, palettes and the legacy colormap, the silent log level.
 // Copyright 2026 the TPMExtractor fork contributors. Licensed under the Apache License,
 // Version 2.0 (see LICENSE). New file in the fork (see CHANGES.md).
 //
@@ -11,6 +11,7 @@
 #include "bmp.h"
 #include "image.h"
 #include "jkout.h"
+#include "log.h"
 #include "options.h"
 #include "platform.h"
 #include "textout.h"
@@ -302,6 +303,40 @@ static void test_textwriter(const std::string& dir)
     CHECK(format_fixed(2.5, 0) == "2" && format_fixed(3.5, 0) == "4");
 }
 
+// Verbosity -2 (the fuzz targets' level) prints no warning or error but still counts them.
+// Runs last: stderr goes to a file from here on, so failures are also reported on stdout.
+static void test_log_silent(const std::string& dir)
+{
+    const std::string path = platform::path_join(dir, "stderr.txt");
+    const int saved = log::verbosity();
+    log::reset_counts();
+    std::fflush(stderr);
+    const bool redirected = std::freopen(path.c_str(), "w", stderr) != nullptr;
+    CHECK(redirected);
+    if (!redirected)
+        return;
+    log::set_verbosity(-2);
+    log::warn("silent %d\n", 1);
+    log::error("silent\n");
+    log::warn_at("file", 4, "silent\n");
+    log::error_at("file", 8, "silent\n");
+    std::fflush(stderr);
+    const std::string silent = slurp(path);
+    const unsigned warnings = log::warning_count(), errors = log::error_count();
+    log::set_verbosity(-1);
+    log::warn("shown\n");
+    std::fflush(stderr);
+    const std::string shown = slurp(path);
+    log::set_verbosity(saved);
+    log::reset_counts();
+    const int failed_before = g_fail;
+    CHECK(silent.empty());
+    CHECK(warnings == 2 && errors == 2);
+    CHECK(shown.find("warning: shown") != std::string::npos);
+    if (g_fail != failed_before)
+        std::printf("unit_layer: log level -2 check failed (stderr: \"%s\")\n", shown.c_str());
+}
+
 static void test_options()
 {
     auto parse = [](std::vector<const char*> a, ParsedArgs& out, std::string& err) {
@@ -425,6 +460,7 @@ int main()
         test_bmp(dir);
         test_textwriter(dir);
         test_image_jk(dir);
+        test_log_silent(dir);
     }
     std::printf("unit_layer: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

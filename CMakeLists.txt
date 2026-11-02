@@ -14,6 +14,8 @@ project(TPMExtractor VERSION 0.1.0 LANGUAGES C CXX)
 
 option(TPMX_SANITIZE "Build every target with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(TPMX_WERROR "Treat compiler warnings as errors" OFF)
+option(TPMX_FUZZ "Build the fuzz targets tests/fuzz_*.cpp (with clang: libFuzzer; see tests/CMakeLists.txt)" OFF)
+option(TPMX_FUZZ_REPLAY "Link the fuzz targets with the replay driver even with clang" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,6 +50,13 @@ else()
   if(TPMX_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
+  endif()
+  # libFuzzer steers by the coverage of the code under test, so every target is instrumented,
+  # not only the fuzz targets (which link with -fsanitize=fuzzer, tests/CMakeLists.txt).
+  if(TPMX_FUZZ AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT TPMX_FUZZ_REPLAY)
+    add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fsanitize=fuzzer-no-link>
+                        $<$<COMPILE_LANG_AND_ID:C,Clang,AppleClang>:-fsanitize=fuzzer-no-link>)
+    add_link_options(-fsanitize=fuzzer-no-link)
   endif()
   if(MINGW)
     add_link_options(-static)  # no libstdc++/libgcc DLLs next to the .exe

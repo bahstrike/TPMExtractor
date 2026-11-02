@@ -290,6 +290,12 @@ They write their dumps to a temporary folder (or `TPM_WORK`) outside the source 
 them afterwards. `TPM_REF_MANIFEST` (a manifest of the original program's output with the
 uninitialised "tail" lines masked) adds the `--legacy` identity test.
 
+Fuzz targets (CMake with `-DTPMX_FUZZ=ON`, best with clang and `-DTPMX_SANITIZE=ON`) cover every
+input the tool reads: BAF files through all their writers in both modes, levels, LAB and `.Z`
+archives and colormaps. The file-level ones fail when anything is written outside their output
+folder. `ctest -L fuzz` runs each one briefly on generated seeds; `tests/CMakeLists.txt` shows how
+to run them for longer.
+
 ## License
 
 Apache License 2.0, like the original (see `LICENSE` and `NOTICE`). `unshieldv3/` is Wolfgang

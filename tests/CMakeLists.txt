@@ -6,6 +6,7 @@
 #   run_tests.py      end-to-end runs of the tpmextractor executable on synthetic fixtures
 #                     (make_fixtures.py), and on a real disc when TPM_DISC is set (skipped
 #                     otherwise). Needs Python 3 (standard library only); skipped without it.
+# With -DTPMX_FUZZ=ON also short runs of the fuzz targets (label "fuzz"; see the end of this file).
 # Every test gets TPMX_EXE, TPMX_SOURCE_DIR and TPMX_TEST_TMP (a folder of its own) in its
 # environment. Optional, from the calling environment: TPM_DISC, TPM_REF_MANIFEST,
 # TPM_REF_UNDEFINED, TPM_WORK (real data), TPMX_REF_EXE and TPMX_REF_B3D_DECOMPRESS (builds of the
@@ -13,8 +14,6 @@
 #
 #   ctest --test-dir build/<dir> --output-on-failure
 #   ctest --test-dir build/<dir> -R e2e_synthetic -V
-
-option(TPMX_FUZZ "Build the libFuzzer targets tests/fuzz_*.cpp (clang -fsanitize=fuzzer)" OFF)
 
 file(GLOB TEST_SUPPORT CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/support/*.cpp)
 file(GLOB UNIT_TESTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/unit_*.cpp)
@@ -56,16 +55,29 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------------------------
-# Fuzz targets: each tests/fuzz_<name>.cpp defines LLVMFuzzerTestOneInput and parses memory only.
-# With clang they link with libFuzzer; with other compilers (or TPMX_FUZZ_REPLAY=ON) they link
-# with tests/fuzz/replay_main.cpp, which runs them on files plus truncations and seeded
+# Fuzz targets: each tests/fuzz_<name>.cpp defines LLVMFuzzerTestOneInput.
+#   in memory:   fuzz_lab (LAB directory), fuzz_b3d (level section walk, LZSS), fuzz_cmp (CMP)
+#   file level:  fuzz_baf (process_baf: BAF parsers and every BAF writer, --legacy and default
+#                mode), fuzz_b3d_file (process_b3d), fuzz_lab_file (extract_lab), fuzz_z
+#                (extract_z). These run in a scratch folder of their own and abort when anything
+#                is written outside the output folder (tests/fuzz/sandbox.h). Set TPMX_FUZZ_TMP
+#                (or TMPDIR) to a RAM disk such as /dev/shm for speed. fuzz_baf builds a full CMP
+#                for every input with a colormap: tens of inputs per second under ASan, so give
+#                it several times the others' time.
+# With clang they link with libFuzzer, and the top-level CMakeLists.txt (which defines TPMX_FUZZ
+# and TPMX_FUZZ_REPLAY) instruments every target for coverage (-fsanitize=fuzzer-no-link), so
+# libFuzzer is guided by the tool's own code; with other compilers (or TPMX_FUZZ_REPLAY=ON) they
+# link with tests/fuzz/replay_main.cpp, which runs them on files plus truncations and seeded
 # mutations. Configure with -DTPMX_SANITIZE=ON as well. Seed inputs: make_fixtures.py OUTDIR
-# writes OUTDIR/fuzz/<name>/.
+# writes OUTDIR/fuzz/<name>/ (<name> without "fuzz_"). With Python 3, ctest runs every target
+# briefly on those seeds (label "fuzz": TPMX_FUZZ_SMOKE_RUNS inputs with libFuzzer, a few
+# truncations and mutations of each seed with the replay driver).
 #   cmake -S . -B build/fuzz -DTPMX_FUZZ=ON -DTPMX_SANITIZE=ON && cmake --build build/fuzz
+#   ctest --test-dir build/fuzz -L fuzz --output-on-failure
 #   python3 -I tests/make_fixtures.py build/fuzz/fixtures
-#   build/fuzz/tests/fuzz_b3d -mutations 2000 build/fuzz/fixtures/fuzz/b3d      (replay driver)
-#   build/fuzz/tests/fuzz_b3d build/fuzz/fixtures/fuzz/b3d                       (libFuzzer)
-option(TPMX_FUZZ_REPLAY "Link the fuzz targets with the replay driver even with clang" OFF)
+#   build/fuzz/tests/fuzz_baf -max_total_time=600 corpus/baf build/fuzz/fixtures/fuzz/baf    (libFuzzer)
+#   build/fuzz/tests/fuzz_b3d -mutations 2000 build/fuzz/fixtures/fuzz/b3d                    (replay driver)
+set(TPMX_FUZZ_SMOKE_RUNS 600 CACHE STRING "Inputs each fuzz target runs in its ctest smoke test (libFuzzer)")
 if(TPMX_FUZZ)
   file(GLOB FUZZ_TARGETS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fuzz_*.cpp)
   set(use_libfuzzer OFF)
@@ -83,4 +95,29 @@ if(TPMX_FUZZ)
     endif()
     target_link_libraries(${name} PRIVATE tpmx_core)
   endforeach()
+
+  # Smoke tests: the seeds, then a short deterministic run of every target on them.
+  if(Python3_Interpreter_FOUND)
+    set(seeds ${TPMX_TESTS_TMP}/fuzz_seeds)
+    add_test(NAME fuzz_seeds
+      COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/make_fixtures.py ${seeds}
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(fuzz_seeds PROPERTIES FIXTURES_SETUP tpmx_fuzz_seeds LABELS fuzz
+      ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    foreach(src ${FUZZ_TARGETS})
+      get_filename_component(name ${src} NAME_WE)
+      string(REGEX REPLACE "^fuzz_" "" corpus ${name})
+      set(tmp ${TPMX_TESTS_TMP}/${name})
+      file(MAKE_DIRECTORY ${tmp}/new)
+      if(use_libfuzzer)
+        # new inputs go to ${tmp}/new, never into the seeds; crash files to ${tmp}
+        set(cmd $<TARGET_FILE:${name}> -runs=${TPMX_FUZZ_SMOKE_RUNS} -seed=1 -timeout=60 -rss_limit_mb=2048
+                -artifact_prefix=${tmp}/ ${tmp}/new ${seeds}/fuzz/${corpus})
+      else()
+        set(cmd $<TARGET_FILE:${name}> -truncations 4 -mutations 4 -seed 1 ${seeds}/fuzz/${corpus})
+      endif()
+      add_test(NAME ${name}_smoke COMMAND ${cmd} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+      set_tests_properties(${name}_smoke PROPERTIES FIXTURES_REQUIRED tpmx_fuzz_seeds LABELS fuzz TIMEOUT 1800)
+    endforeach()
+  endif()
 endif()

@@ -2277,22 +2277,57 @@ def self_test():
     return 0 if not problems else 1
 
 
+# Byte 0 of a fuzz_baf input chooses the run (see tests/fuzz_baf.cpp): default mode, --legacy,
+# --radius animated with --insert-offset node0, --palette with --no-draw-scale and --no-mat8,
+# and --no-mat16/--no-bmp/--no-debug-dumps with --radius stored, --angles rad2deg, --scale 0.5.
+FUZZ_BAF_MODES = (0x00, 0x01, 0x0E, 0x33, 0xC2)
+
+
 def write_fuzz_corpus(root):
-    """Seed inputs for the fuzz targets (tests/fuzz_*.cpp): OUTDIR/<target>/<file>."""
+    """Seed inputs for the fuzz targets (tests/fuzz_*.cpp): OUTDIR/<target>/<file>, one folder
+    per target named after it without "fuzz_" (lab, lab_file, b3d, b3d_file, cmp, baf, z). The
+    file-level targets also get the damaged and hostile-name inputs."""
+    def put(target, name, data):
+        write_file(os.path.join(root, target, name), data)
+
     for layout in ('sequential', 'scrambled'):
         lab = make_lab(localize_lab_entries(), layout)
         for mode in (0, 1):               # byte 0: the layout the parser assumes; byte 1: extra file size
-            write_file(os.path.join(root, 'lab', '%s_%d.bin' % (layout, mode)), bytes([mode, 0]) + lab)
+            put('lab', '%s_%d.bin' % (layout, mode), bytes([mode, 0]) + lab)
+        put('lab_file', layout, lab)      # fuzz_lab_file reads the archive as it is
+    put('lab_file', 'names', unsafe_name_lab())
+    for name, data in lab_mutants():
+        put('lab_file', 'damaged_' + name, data)
+
     for name, spec in level_fixtures().items():
         comp, image = level_file(name, spec, True)
-        write_file(os.path.join(root, 'b3d', name.lower()), comp)
-        write_file(os.path.join(root, 'b3d', name.lower() + '.dec'), dec_of(image))
+        for target in ('b3d', 'b3d_file'):
+            put(target, name.lower(), comp)
+            put(target, name.lower() + '.dec', dec_of(image))
+        put('b3d_file', name.lower() + '.raw', level_file(name, spec, False)[0])
     for name, stream in lzss_cases()[:12]:
-        write_file(os.path.join(root, 'b3d', 'lzss_' + name), lzss_level_file(stream))
+        for target in ('b3d', 'b3d_file'):
+            put(target, 'lzss_' + name, lzss_level_file(stream))
+    for name, data in level_mutants():
+        put('b3d_file', 'damaged_' + name, data)
+
     trans = bytes((s + d) // 2 for s in range(256) for d in range(256))
-    write_file(os.path.join(root, 'cmp', 'retail.cmp'), retail_cmp_bytes(PAL_A, ramp_light_table(), trans))
-    write_file(os.path.join(root, 'cmp', 'nolight.cmp'), retail_cmp_bytes(PAL_B, ramp_light_table()))
-    write_file(os.path.join(root, 'cmp', 'legacy.cmp'), legacy_cmp_bytes(PAL_C))
+    put('cmp', 'retail.cmp', retail_cmp_bytes(PAL_A, ramp_light_table(), trans))
+    put('cmp', 'nolight.cmp', retail_cmp_bytes(PAL_B, ramp_light_table()))
+    put('cmp', 'legacy.cmp', legacy_cmp_bytes(PAL_C))
+
+    for name, spec in baf_fixtures() + [('names.baf', unsafe_name_baf())]:
+        data = build_baf(spec)[0]
+        for mode in FUZZ_BAF_MODES:
+            put('baf', '%s_%02x' % (name.split('.')[0], mode), bytes([mode]) + data)
+    for name, data in baf_mutants(dict(baf_fixtures())['rig.baf']):
+        for mode in FUZZ_BAF_MODES[:2]:   # default mode and --legacy
+            put('baf', 'damaged_%s_%02x' % (name.split('.')[0], mode), bytes([mode]) + data)
+
+    put('z', 'multi', make_is3(multi_z_members()))
+    put('z', 'names', unsafe_name_z())
+    for name, data in z_mutants():
+        put('z', 'damaged_' + name, data)
 
 
 def write_all(outdir):

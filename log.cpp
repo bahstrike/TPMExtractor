@@ -16,6 +16,8 @@ int g_level = 0;
 unsigned g_errors = 0;
 unsigned g_warnings = 0;
 
+const int kSilent = -2;  // at or below this level warnings and errors are counted, not printed
+
 void emit(FILE* stream, const std::string& prefix, const char* fmt, va_list ap)
 {
     std::string s = prefix;
@@ -68,6 +70,8 @@ void debug(const char* fmt, ...)
 void warn(const char* fmt, ...)
 {
     ++g_warnings;
+    if (g_level <= kSilent)
+        return;
     std::fflush(stdout);
     va_list ap;
     va_start(ap, fmt);
@@ -78,6 +82,8 @@ void warn(const char* fmt, ...)
 void error(const char* fmt, ...)
 {
     ++g_errors;
+    if (g_level <= kSilent)
+        return;
     std::fflush(stdout);
     va_list ap;
     va_start(ap, fmt);
@@ -88,6 +94,8 @@ void error(const char* fmt, ...)
 void error_at(const std::string& file, uint64_t offset, const char* fmt, ...)
 {
     ++g_errors;
+    if (g_level <= kSilent)
+        return;
     std::fflush(stdout);
     va_list ap;
     va_start(ap, fmt);
@@ -98,6 +106,8 @@ void error_at(const std::string& file, uint64_t offset, const char* fmt, ...)
 void warn_at(const std::string& file, uint64_t offset, const char* fmt, ...)
 {
     ++g_warnings;
+    if (g_level <= kSilent)
+        return;
     std::fflush(stdout);
     va_list ap;
     va_start(ap, fmt);

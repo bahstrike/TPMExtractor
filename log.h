@@ -16,7 +16,8 @@
 namespace tpmx {
 namespace log {
 
-// -1 quiet (errors and warnings only), 0 normal, 1 verbose, 2 debug.
+// -2 silent (nothing is printed; warnings and errors are still counted; for fuzz targets and
+// tests), -1 quiet (errors and warnings only), 0 normal, 1 verbose, 2 debug.
 void set_verbosity(int level);
 int verbosity();
 
