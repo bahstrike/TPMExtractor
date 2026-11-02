@@ -897,6 +897,12 @@ def compare_key(d, l, label, pb, fac=None):
     for x, y in zip(dl, ll):
         if x == y:
             continue
+        if x.startswith(b'JOINTS ') and y.startswith(b'JOINTS ') and x[7:].isdigit() and y[7:].isdigit():
+            # raised to the model's hierarchy node count (key_joints_cover); checked against the
+            # model in real.default_smoke
+            if int(x[7:]) < int(y[7:]):
+                bad += 1
+            continue
         tx, ty = x.decode('latin-1').split('\t'), y.decode('latin-1').split('\t')
         if len(tx) != 9 or len(ty) != 9 or tx[:3] != ty[:3] or tx[6:] != ty[6:] or not scaled_same(tx[3:6], ty[3:6], fac):
             bad += 1
@@ -1104,9 +1110,26 @@ def level_image_for_tool(info, fname):
 DRAW_SCALE_DEFAULT = True
 
 
+def draw_scale_steps(spec, draw_scale=DRAW_SCALE_DEFAULT):
+    """The draw scale default mode applies, in hundredths (100: 1.0, or --no-draw-scale): the
+    stored value rounded, so that 1.00001 (as many retail BAFs store 1.0) is 1.0."""
+    if not draw_scale:
+        return 100
+    return int(math.floor(mf.f32(spec.get('fac', 1.0)) * 100.0 + 0.5))
+
+
 def effective_scale(spec, scale, draw_scale=DRAW_SCALE_DEFAULT):
-    fac = spec.get('fac', 1.0) if draw_scale else 1.0
-    return mf.f32(mf.f32(scale) * mf.f32(fac))
+    return mf.f32(mf.f32(scale) * mf.f32(draw_scale_steps(spec, draw_scale) / 100.0))
+
+
+def scaled_name(name, steps):
+    """A 3DO or KEY name as default mode writes it at a draw scale other than 1: "_s<hundredths>"
+    before the extension, since JK holds one model or key per name and other BAFs may share the
+    name at another scale. Debug dumps keep the BAF's own names."""
+    if steps == 100:
+        return name
+    stem, dot, ext = name.rpartition('.')
+    return stem + '_s%03d' % steps + dot + ext if dot else name + '_s%03d' % steps
 
 
 class BafOpts:
@@ -1122,6 +1145,20 @@ def mat_textures(mat_spec):
     return [(t['w'], t['h'], t['transparent'], t['mips']) for t in mat_spec['textures']]
 
 
+KEY_JOINTS = re.compile(rb'\r\nJOINTS (\d+)\r\n')
+
+
+def key_joints_cover(text, nodes):
+    """A .key text with JOINTS raised to the model's hierarchy node count: JK allocates JOINTS
+    joints for a key and its animation code reads the one at every hierarchy node's index (the
+    retail engine without a bounds check), so a key that animates fewer nodes must still declare
+    them all. NODES stays the number of joints written."""
+    m = KEY_JOINTS.search(text)
+    if not m or int(m.group(1)) >= nodes:
+        return text
+    return text[:m.start(1)] + b'%d' % nodes + text[m.end(1):]
+
+
 def check_baf_default(files, spec, data, o, label, pb):
     """The output of one BAF in default mode (files: {name: bytes}), against the fixture spec and
     the original's output for the same options."""
@@ -1130,8 +1167,9 @@ def check_baf_default(files, spec, data, o, label, pb):
     leg = legacy_baf_files(data, scale=o.scale, angles=o.angles, fallback_palette=fallback, padded_bmp=True,
                            mat16=o.mat16, bmp=o.bmp, debug_dumps=o.debug)
     # the model and keys: the original's output for the same BAF at the effective scale, re-rooted
-    # for node0
+    # for node0, under names that carry a draw scale other than 1
     scale = effective_scale(spec, o.scale, o.draw_scale)
+    steps = draw_scale_steps(spec, o.draw_scale)
     mspec = mf.rerooted(spec) if o.insert == 'node0' else spec
     model_ref = legacy_baf_files(mf.build_baf(mspec)[0], scale=scale, angles=o.angles, fallback_palette=fallback,
                                  padded_bmp=True, mat16=o.mat16, bmp=o.bmp, debug_dumps=o.debug)
@@ -1143,7 +1181,8 @@ def check_baf_default(files, spec, data, o, label, pb):
         cm = legacy_baf_files(mf.build_baf(mf.with_colormap(mspec))[0], scale=scale, angles=o.angles,
                               padded_bmp=True, mat16=o.mat16, bmp=o.bmp, debug_dumps=o.debug)
         model_name = spec['model']['name']
-        got = try_parse_3do(files[model_name], label, Problems()) if model_name in files else None
+        out_name = scaled_name(model_name, steps)
+        got = try_parse_3do(files[out_name], label, Problems()) if out_name in files else None
         if model_name in cm and got is not None and got['kind'] == 'model':
             model_ref = cm
             variant = 'has_colormap read'
@@ -1151,14 +1190,32 @@ def check_baf_default(files, spec, data, o, label, pb):
         pb.note('%s: colormap-less BAF written by the %s' % (label, variant))
     seen = set()
     cmp_name = spec['colormap']['name'] if has_cmap else None
+    # the palette every 8-bit MAT indexes: --palette, else the colormap, else (no colormap) the
+    # first material's own palette, else the grayscale ramp
+    own0 = next((m['palette'] for m in spec['materials'] if m['type'] & 1), None)
+    if o.palette is not None:
+        mat8_pal = o.palette
+    elif has_cmap:
+        mat8_pal = spec['colormap']['palette']
+    else:
+        mat8_pal = own0 or mf.grayscale_palette()
     # colormap
     if has_cmap:
         seen.add(cmp_name)
         if pb.check(cmp_name in files, '%s: no colormap %s' % (label, cmp_name)):
             check_retail_cmp(files[cmp_name], '%s/%s' % (label, cmp_name), pb, spec['colormap']['palette'])
     else:
-        extra = [n for n in files if n.lower().endswith('.cmp')]
-        pb.check(not extra, '%s: colormap-less BAF wrote %s' % (label, extra))
+        # a colormap-less BAF gets <BAF name>.cmp with the palette its 8-bit MATs index (none
+        # with --palette, whose palette they index instead, or without 8-bit MATs)
+        cmps = [n for n in files if n.lower().endswith('.cmp')]
+        own_cmp = spec['file'].split('.')[0] + '.cmp'
+        if o.mat8 and o.palette is None:
+            seen.add(own_cmp)
+            if pb.check(cmps == [own_cmp], '%s: colormap-less BAF wrote colormaps %s, expected %s'
+                        % (label, cmps, own_cmp)):
+                check_retail_cmp(files[own_cmp], '%s/%s' % (label, own_cmp), pb, mat8_pal)
+        else:
+            pb.check(not cmps, '%s: colormap-less BAF wrote %s' % (label, cmps))
     # materials
     base_pal = spec['colormap']['palette'] if has_cmap else (o.palette or mf.grayscale_palette())
     for mspec in spec['materials']:
@@ -1169,9 +1226,11 @@ def check_baf_default(files, spec, data, o, label, pb):
         m8 = mat8_name(name)
         seen |= {raw, b16, bmpn, m8}
         if pb.check(raw in files, '%s: no raw MAT copy %s' % (label, raw)):
-            want = leg.get(raw)
-            ok = files[raw] == want or (mspec['type'] & 1 and files[raw] == want + mf.palette_bytes(mspec['palette']))
-            pb.check(ok, '%s: raw MAT copy %s differs from the original\'s (palette appended or not)' % (label, raw))
+            # the original's copy followed by the palette its type announces (JK's loader reads
+            # those 768 bytes after the last mip; the original left them out)
+            want = leg.get(raw, b'') + (mf.palette_bytes(mspec['palette']) if mspec['type'] & 1 else b'')
+            pb.check(files[raw] == want, '%s: raw MAT copy %s is not the original\'s copy plus the own palette: %s'
+                     % (label, raw, first_difference(files[raw], want)))
         for n, on in ((b16, o.mat16), (bmpn, o.bmp)):
             if on:
                 if pb.check(n in files, '%s: missing %s' % (label, n)):
@@ -1185,25 +1244,20 @@ def check_baf_default(files, spec, data, o, label, pb):
         if not pb.check(m8 in files, '%s: no 8-bit MAT %s' % (label, m8)):
             continue
         own = mspec['palette'] if mspec['type'] & 1 else base_pal
-        if o.palette is not None:
-            dst = o.palette
-        elif has_cmap:
-            dst = spec['colormap']['palette']
-        else:
-            dst = own
-        check_mat8(files[m8], '%s/%s' % (label, m8), pb, mat_textures(mspec), dst, [own] * len(mspec['textures']))
+        check_mat8(files[m8], '%s/%s' % (label, m8), pb, mat_textures(mspec), mat8_pal,
+                   [own] * len(mspec['textures']))
     # model and keys
-    model_name = spec['model']['name']
     names3do = [n for n in model_ref if n.endswith('.3do')]
-    for n in names3do:
+    for ln in names3do:
+        n = scaled_name(ln, steps)
         seen.add(n)
         if not pb.check(n in files, '%s: no %s' % (label, n)):
             continue
-        d, l = try_parse_3do(files[n], '%s/%s' % (label, n), pb), parse_3do(model_ref[n])
+        d, l = try_parse_3do(files[n], '%s/%s' % (label, n), pb), parse_3do(model_ref[ln])
         if d is None:
             continue
         if l['kind'] != 'model':
-            pb.check(files[n] == model_ref[n], '%s: %s (key format, as the original) differs' % (label, n))
+            pb.check(files[n] == model_ref[ln], '%s: %s (key format, as the original) differs' % (label, n))
             continue
         if not pb.check(d['kind'] == 'model', '%s: %s is not a model-format 3DO' % (label, n)):
             continue
@@ -1218,11 +1272,13 @@ def check_baf_default(files, spec, data, o, label, pb):
         if o.mat8 or o.mat16:       # with neither, the 3DO names <base>16.mat files that are not written
             for mat in d['materials']:
                 pb.check(mat in files, '%s/%s: MATERIALS names %s, which was not written' % (label, n, mat))
-    for n in [n for n in model_ref if n.endswith('.key')]:
+    for ln in [n for n in model_ref if n.endswith('.key')]:
+        n = scaled_name(ln, steps)
         seen.add(n)
         if pb.check(n in files, '%s: no %s' % (label, n)):
-            pb.check(files[n] == model_ref[n], '%s: %s differs from the expected bytes: %s'
-                     % (label, n, first_difference(files[n], model_ref[n])))
+            want = key_joints_cover(model_ref[ln], len(spec['model']['nodes']))
+            pb.check(files[n] == want, '%s: %s differs from the expected bytes: %s'
+                     % (label, n, first_difference(files[n], want)))
     # debug dumps: present exactly when switched on (content is not part of the contract)
     debug = [n for n in files if n.endswith('.3do.txt') or n.endswith('.key.txt') or n == 'REMAIN.HEX']
     if o.debug:
@@ -1462,7 +1518,8 @@ for _tag, _cli, _o, *_more in [
         ('radius_animated', ['--radius', 'animated'], BafOpts(radius='animated')),
         ('no_draw_scale', ['--no-draw-scale'], BafOpts(draw_scale=False)),
         ('insert_zero', ['--insert-offset', 'zero'], BafOpts(insert='zero')),
-        ('insert_node0', ['--insert-offset', 'node0'], BafOpts(insert='node0')),
+        # the re-rooted origin is node 0: the computed RADIUS then also covers every key frame
+        ('insert_node0', ['--insert-offset', 'node0'], BafOpts(insert='node0', radius='animated')),
         ('insert_legacy', ['--insert-offset', 'legacy'], BafOpts(insert='legacy')),
         ('insert_xyz', ['--insert-offset', '1.5,-2,0.25'], BafOpts(insert=(1.5, -2.0, 0.25))),
 ]:
@@ -1514,6 +1571,74 @@ def t_baf_default(ctx):
     r = ctx.tool('--no-pause', 'baf', os.path.join(d['baf'], 'box.baf'), one)
     sound_run(r, pb)
     check_baf_dirs_default(ctx, one, BafOpts(), pb, {'box.baf': BAF_SPECS['box.baf']})
+    pb.done()
+
+
+def bafall_specs(ctx, tag, specs, *opts):
+    """Runs bafall in default mode over the BAFs `specs` ({file name: spec}); (run, output dir)."""
+    src = fresh_dir(ctx.path(tag + '_in'))
+    for n, s in specs.items():
+        write(os.path.join(src, n), mf.build_baf(s)[0])
+    out = ctx.path(tag + '_out')
+    shutil.rmtree(out, ignore_errors=True)
+    return ctx.tool('--no-pause', *(list(opts) + ['bafall', src, out])), out
+
+
+@test('baf.draw_scale_names')
+def t_draw_scale_names(ctx):
+    """BAFs that share a model and a key but are drawn at different scales: JK holds one model or
+    key per name, so default mode names the scaled copies apart (<name>_s<hundredths>), and a
+    draw scale stored 1e-5 off its value (as about half of the retail BAFs store theirs) gives the
+    same output as the exact value. Within the output of all of them, a 3DO or KEY name always
+    means the same bytes."""
+    pb = Problems()
+    base = BAF_SPECS['box.baf']
+    specs = {'box.baf': base,
+             'boxnear.baf': dict(base, file='boxnear.baf', fac=mf.bits_f32(0x3F800054)),   # 1.00001
+             'boxbig.baf': dict(base, file='boxbig.baf', fac=1.5),
+             'boxbig2.baf': dict(base, file='boxbig2.baf', fac=mf.bits_f32(0x3FC0007E))}  # 1.500015
+    r, out = bafall_specs(ctx, 'drawscale', specs)
+    sound_run(r, pb)
+    check_baf_dirs_default(ctx, out, BafOpts(), pb, specs)
+    tree = read_tree(out)
+    by_name = {}
+    for k, v in tree.items():
+        stem, _, name = k.partition('/')
+        if name.endswith('.3do') or name.endswith('.key'):
+            by_name.setdefault(name.lower(), {})[stem] = v
+    for name, per in sorted(by_name.items()):
+        pb.check(len(set(per.values())) == 1, '%s: written with different bytes by %s' % (name, sorted(per)))
+    for stem, names in (('box', ('box.3do', 'spin.key')), ('boxnear', ('box.3do', 'spin.key')),
+                        ('boxbig', ('box_s150.3do', 'spin_s150.key')), ('boxbig2', ('box_s150.3do', 'spin_s150.key'))):
+        for n in names:
+            pb.check(stem + '/' + n in tree, '%s: no %s' % (stem, n))
+    pb.check(sum(1 for l in r.out.decode('latin-1').splitlines() if 'drawn at scale 1.50' in l) == 2,
+             'the renamed outputs of the two BAFs drawn at 1.5 are not reported')
+    pb.done()
+
+
+@test('baf.mat8_colour_warning')
+def t_mat8_colour_warning(ctx):
+    """A material whose own palette has no close match in the colormap loses its colours in its
+    8-bit MAT (JK draws everything through one palette): the tool says so, naming the BAF and the
+    material. A material whose palette is the colormap's, reordered, keeps them: no warning."""
+    pb = Problems()
+    base = BAF_SPECS['stub.baf']
+    tex = mf.tex_gradient(4, 4, 1, 200)
+
+    def variant(fname, mname, pal):
+        s = dict(base, file=fname, fac=1.0)
+        s['materials'] = [{'name': mname, 'type': 3, 'palette': pal,
+                           'textures': [{'w': 4, 'h': 4, 'transparent': 0, 'mips': [tex]}]}]
+        return s
+    specs = {'far.baf': variant('far.baf', 'far.mat', [(255, 0, 128)] * 256),
+             'near.baf': variant('near.baf', 'near.mat', mf.PAL_PERM)}
+    r, out = bafall_specs(ctx, 'colourwarn', specs)
+    sound_run(r, pb)
+    lines = [l for l in r.warnings() if 'lose their colours' in l]
+    pb.check(any('far.baf' in l and '"far.mat"' in l for l in lines), 'no colour warning for far.mat: %s' % lines)
+    pb.check(not any('near.baf' in l for l in lines), 'a colour warning for exact palette matches: %s' % lines)
+    check_baf_dirs_default(ctx, out, BafOpts(), pb, specs)
     pb.done()
 
 
@@ -1948,6 +2073,8 @@ def t_real_default(ctx):
         d = os.path.join(out, 'BAF', stem)
         files = {f: open(os.path.join(d, f), 'rb').read() for f in os.listdir(d)}
         cmps = [f for f in files if f.lower().endswith('.cmp')]
+        pb.check(cmps or not any(f.lower().endswith('.mat') for f in files),
+                 'BAF/%s: no colormap next to the 8-bit MATs that index one' % stem)
         pal = None
         for f in cmps:
             c = check_retail_cmp(files[f], 'BAF/%s/%s' % (stem, f), pb)
@@ -1964,6 +2091,9 @@ def t_real_default(ctx):
         for f, m in mats.items():
             if not m['raw_fill'] or m['fmt'][1] != 8:
                 continue                      # not a raw copy (16-bit MAT or an 8-bit MAT written by the tool)
+            pb.check(not m['type'] & 1 or (m['palette'] is not None and m['trailing'] == 0),
+                     'BAF/%s/%s: type %d announces a 768-byte palette after the pixels, which the copy lacks'
+                     % (stem, f, m['type']))
             m8 = mat8_name(f)
             if not pb.check(m8 in files, 'BAF/%s: no %s for %s' % (stem, m8, f)):
                 continue
@@ -1986,6 +2116,12 @@ def t_real_default(ctx):
             check_3do_numbers(m, 'BAF/%s/%s' % (stem, f), pb)
             for mat in m['materials']:
                 pb.check(mat in files, 'BAF/%s/%s: MATERIALS names %s, which was not written' % (stem, f, mat))
+            for kf, kdata in files.items():
+                if kf.endswith('.key'):
+                    km = KEY_JOINTS.search(kdata)
+                    pb.check(km is not None and int(km.group(1)) >= len(m['nodes']),
+                             'BAF/%s/%s: JOINTS %s, fewer than the %d hierarchy nodes of %s'
+                             % (stem, kf, km.group(1).decode() if km else '(none)', len(m['nodes']), f))
     levels = sum(1 for k in os.listdir(os.path.join(out, 'LEVEL'))) if os.path.isdir(os.path.join(out, 'LEVEL')) else 0
     print('    default mode: %d BAF folders, %d CMPs, %d 8-bit MATs, %d model 3DOs (%d key-format), %d levels'
           % (stats['bafs'], stats['cmp'], stats['mat8'], stats['3do'], stats['key3do'], levels))
@@ -2006,15 +2142,20 @@ def t_real_compare(ctx):
         with open(p, 'rb') as f:
             return f.read()
 
-    # each BAF's draw scale (header +0xAC), from the BAFs the run extracted from big.lab
-    facs = {}
+    # each BAF's applied draw scale (header +0xAC, in hundredths), from the BAFs the run extracted
+    # from big.lab; a 3DO or KEY written at a scale other than 1 carries it in its name
+    steps = {}
     big = os.path.join(lout, 'biglab')
     for f in os.listdir(big) if os.path.isdir(big) else []:
         if f.lower().endswith('.baf'):
             with open(os.path.join(big, f), 'rb') as fh:
                 head = fh.read(0xB0)
             if len(head) == 0xB0:
-                facs[f.split('.')[0]] = struct.unpack_from('<f', head, 0xAC)[0] if DRAW_SCALE_DEFAULT else 1.0
+                steps[f.split('.')[0]] = draw_scale_steps({'fac': struct.unpack_from('<f', head, 0xAC)[0]})
+
+    def fac_of(stem):
+        s = steps.get(stem, 100)
+        return None if s == 100 else s / 100.0
 
     same = changed = palette_appended = 0
     changed_kinds = {}
@@ -2026,12 +2167,14 @@ def t_real_compare(ctx):
             low = f.lower()
             free = (low.endswith('.3do') or low.endswith('.3do.txt') or low.endswith('.key.txt') or f == 'REMAIN.HEX'
                     or (rel.startswith('BAF/') and low.endswith('.cmp')))
-            if rel.startswith('BAF/') and low.endswith('.key') and os.path.isfile(q):
+            if rel.startswith('BAF/') and (low.endswith('.key') or low.endswith('.3do')):
                 stem = rel.split('/')[1]
-                fac = facs.get(stem)
-                compare_key(digest(q), digest(p), rel, pb, None if fac == 1.0 else fac)
-                same += 1
-                continue
+                q = os.path.join(dout, 'BAF', stem, scaled_name(f, steps.get(stem, 100)))
+            if rel.startswith('BAF/') and low.endswith('.key'):
+                if os.path.isfile(q):
+                    compare_key(digest(q), digest(p), rel, pb, fac_of(stem))
+                    same += 1
+                    continue
             if not os.path.isfile(q):
                 pb.add('default mode lacks %s' % rel)
                 continue
@@ -2046,25 +2189,45 @@ def t_real_compare(ctx):
             else:
                 changed += 1
                 pb.add('%s differs between --legacy and default mode' % rel)
+    shared = {}   # default-mode 3DO or KEY name -> [(BAF, its --legacy file, its default-mode file)]
     for stem in real_baf_dirs(dout):
         ld = os.path.join(lout, 'BAF', stem)
         dd = os.path.join(dout, 'BAF', stem)
+        legacy_files = set(os.listdir(ld)) if os.path.isdir(ld) else set()
+        renamed = {scaled_name(f, steps.get(stem, 100)): f for f in legacy_files if f.endswith('.3do') or f.endswith('.key')}
         for f in os.listdir(dd):
-            if f.endswith('.3do') and os.path.isfile(os.path.join(ld, f)):
+            lf = renamed.get(f, f)
+            if (f.endswith('.3do') or f.endswith('.key')) and lf in legacy_files:
+                shared.setdefault(f.lower(), []).append((stem, lf, f))
+            if f.endswith('.3do') and lf in legacy_files:
                 a = try_parse_3do(digest(os.path.join(dd, f)), 'BAF/%s/%s' % (stem, f), pb)
-                b = try_parse_3do(digest(os.path.join(ld, f)), 'BAF/%s/%s (--legacy)' % (stem, f), pb)
+                b = try_parse_3do(digest(os.path.join(ld, lf)), 'BAF/%s/%s (--legacy)' % (stem, lf), pb)
                 if a and b and a['kind'] == 'model' and b['kind'] == 'model':
                     # --legacy lists <base>16.mat, default mode <base>8.mat
                     names = [x[:-6] + '8.mat' if x.endswith('16.mat') else x for x in b['materials']]
-                    fac = facs.get(stem)
-                    compare_3do(a, b, 'BAF/%s/%s' % (stem, f), pb, names, fac=None if fac == 1.0 else fac)
-            elif not os.path.isfile(os.path.join(ld, f)):
-                ok = f.endswith('8.mat') or f.endswith('.3do') or f.endswith('.key') or f.endswith('.txt')
+                    compare_3do(a, b, 'BAF/%s/%s' % (stem, f), pb, names, fac=fac_of(stem))
+            elif lf not in legacy_files:
+                # a colormap-less BAF also gets the colormap its 8-bit MATs index
+                ok = (f.endswith('8.mat') or f.endswith('.3do') or f.endswith('.key') or f.endswith('.txt')
+                      or (f.endswith('.cmp') and not any(x.lower().endswith('.cmp') for x in legacy_files)))
                 pb.check(ok, 'default mode adds BAF/%s/%s' % (stem, f))
-    print('    %d files identical in both modes (keys: up to the draw scale, %d BAFs have one other than 1), '
-          '%d raw MATs with their palette appended, %d allowed to differ %s'
-          % (same, sum(1 for v in facs.values() if v != 1.0), palette_appended, sum(changed_kinds.values()),
-             changed_kinds))
+    # JK holds one model and one key per name: where BAFs share a name and the original wrote the
+    # same bytes for all of them, default mode must too (a draw scale other than 1 renames them)
+    clashes = 0
+    for name, members in sorted(shared.items()):
+        if len(members) < 2:
+            continue
+        if len({digest(os.path.join(lout, 'BAF', s, lf)) for s, lf, _ in members}) != 1:
+            continue        # the BAFs' own data differ: a clash in the original's output too
+        if len({digest(os.path.join(dout, 'BAF', s, f)) for s, _, f in members}) != 1:
+            clashes += 1
+            pb.add('%s: identical in the original\'s output of BAFs %s, different in default mode'
+                   % (name, ', '.join(s for s, _, _ in members[:4])))
+    print('    %d files identical in both modes (keys: up to the draw scale, %d BAFs drawn at a scale other '
+          'than 1), %d raw MATs with their palette appended, %d allowed to differ %s; %d model/key names shared '
+          'by several BAFs' % (same, sum(1 for v in steps.values() if v != 100), palette_appended,
+                               sum(changed_kinds.values()), changed_kinds,
+                               sum(1 for m in shared.values() if len(m) > 1)))
     pb.done(summary=True)
 
 

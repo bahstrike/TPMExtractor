@@ -9,6 +9,10 @@
 // layout (bounds-checked, header fields validated) and writes JK-ready 3DO/KEY values plus
 // retail CMPs and 8-bit MATs; --legacy keeps the original sequential read, now from memory
 // with every count bounded, and still writes the original's output byte for byte.
+// Modified 2026 in the TPMExtractor fork (see CHANGES.md): legacy texture sizes checked before
+// any product that could overflow; default mode keeps own palettes in the raw MAT copies, gives
+// a colormap-less BAF the colormap its 8-bit MATs index, declares every model node in KEY
+// JOINTS, names scaled 3DOs and KEYs apart and warns when 8-bit MATs lose their colours.
 //
 // The BAF layout (little-endian; the game loads it as a series of in-memory struct dumps, so
 // pointer fields hold stale editor values):
@@ -1412,6 +1416,14 @@ const uint64_t kMaxBafFileSize = 256ull << 20;
 // with a warning. The retail disc uses 0.5..3.0.
 const float kMinDrawScale = 1.0f / 64.0f;
 const float kMaxDrawScale = 64.0f;
+// Default mode applies the draw scale in hundredths: the retail values are 0.5..3.0 in steps of
+// 0.05, and about half of the BAFs store theirs about 1e-5 too high (1.00001 for 1.0), which
+// would otherwise make keys and models that BAFs share differ in their last digits.
+const int kDrawScaleSteps = 100;
+// A 3DO or KEY written at a draw scale other than 1 gets "_s<hundredths, 3 digits>" before its
+// extension ("_s110" for 1.1): JK keeps one model and one key per name, and a key or model that
+// other BAFs share unscaled (or at another scale) must not get the same name.
+const char* const kDrawScaleSuffix = "_s";
 
 // JK values written in default mode.
 const int kJkTextureModePerspective = 3;  // TEXTUREMODE: TPM stores 0, which JK draws affine
@@ -1424,6 +1436,10 @@ const char* const kMat8Suffix = "8.mat";          // "<MAT name minus .mat>8.mat
 const int kMat8MipLevels = jk::kMat8MaxMips;      // generate up to JK's 4 mip levels ...
 const int kMat8MinMipSide = 8;                    // ... while both sides stay >= 8 texels
 const jk::ColorMetric kMat8Metric = jk::ColorMetric::Redmean;  // as build_cmp's light tables
+// An 8-bit MAT whose texels moved further than this on average (RGB distance, 0..441) from their
+// colours in the source palette is reported: a material with its own palette (or every material
+// with --palette) can only use the colours of the one palette JK draws with.
+const double kMat8RemapWarnError = 48.0;
 
 // Model RADIUS covering the keys (BafExtras::animated_radius): frames sampled per key, and a
 // budget of vertex transforms per BAF that bounds the work on malformed files.
@@ -1473,8 +1489,8 @@ struct BafMaterial
 	std::vector<BafTexture> textures;
 	bool own_palette = false;
 	Palette palette;
-	const uint8_t* stream = nullptr;          // the MAT stream without the palette: the raw copy
-	size_t stream_size = 0;
+	const uint8_t* stream = nullptr;          // the MAT as stored after its name, with the palette
+	size_t stream_size = 0;                   // of an own-palette material: the raw copy
 };
 
 struct BafFace
@@ -1680,13 +1696,15 @@ void parse_material(BinReader& r, BafMaterial& m)
 		}
 		m.textures.push_back(std::move(tex));
 	}
-	m.stream = stream;
-	m.stream_size = r.pos() - start;
 	if (m.type & 1)
 	{
 		r.bytes(m.palette.c, kPaletteSize);
 		m.own_palette = true;
 	}
+	// The raw copy keeps the palette that the type announces, so it loads in JK (whose loader
+	// reads the 768 bytes after the last mip); the original's copy left it out.
+	m.stream = stream;
+	m.stream_size = r.pos() - start;
 }
 
 void parse_model(BinReader& r, const std::vector<BafMaterial>& mats, BafModel& m)
@@ -2138,6 +2156,8 @@ double length(double x, double y, double z) { return std::sqrt(x * x + y * y + z
 struct ModelOut
 {
 	float scale = 1.0f;                       // effective scale
+	float draw_scale = 1.0f;                  // the applied draw scale (1 when switched off)
+	std::string name_suffix;                  // for the 3DO and KEY names when draw_scale != 1
 	bool reroot = false;
 	float reroot_z = 0.0f;                    // node 0's z (model units) moved to the insert offset
 	std::vector<std::vector<Vec3f>> verts;    // per mesh
@@ -2328,9 +2348,28 @@ double tidy(double v) { return std::fabs(v) < 5e-7 ? 0.0 : v; }
 // node 0's position as the insert offset alone would leave them hovering by node0.z * scale.
 void init_model_out(const Baf& b, const Options& opts, const BafExtras& extras, ModelOut& g)
 {
-	g.scale = opts.scale * (extras.draw_scale ? b.hdr.draw_scale : 1.0f);
+	g.draw_scale = 1.0f;
+	g.name_suffix.clear();
+	if (extras.draw_scale)
+	{
+		// parse_header() keeps the value within kMinDrawScale..kMaxDrawScale
+		const long steps = std::lround((double)b.hdr.draw_scale * kDrawScaleSteps);
+		g.draw_scale = (float)((double)steps / kDrawScaleSteps);
+		if (steps != kDrawScaleSteps)
+			g.name_suffix = format("%s%03d", kDrawScaleSuffix, (int)steps);
+	}
+	g.scale = opts.scale * g.draw_scale;
 	g.reroot = opts.insert_offset.mode == InsertOffsetMode::Node0 && b.model_parsed && !b.model.nodes.empty();
 	g.reroot_z = g.reroot ? b.model.nodes[0].pos.z : 0.0f;
+}
+
+// "<name>" with the draw-scale suffix inserted before its extension ("a.key" -> "a_s110.key").
+std::string scaled_name(const std::string& name, const std::string& suffix)
+{
+	if (suffix.empty())
+		return name;
+	const size_t dot = name.rfind('.');
+	return dot == std::string::npos ? name + suffix : name.substr(0, dot) + suffix + name.substr(dot);
 }
 
 // Everything the 3DO and the KEYs need from the model, in default mode.
@@ -2715,7 +2754,11 @@ bool write_model_3do(const std::string& path, const Baf& b, const ModelOut& g,
 	return close_text(mf);
 }
 
-bool write_key(const std::string& path, const BafKey& k, const ModelOut& g, const Options& opts)
+// JOINTS is the size of the joint array JK allocates for the key, and JK's animation code reads
+// that array at every hierarchy node's index (the original engine without a bounds check), so
+// it covers the model's nodes even when the key animates fewer of them; NODES stays the number
+// of joints written, and the joints without a NODE block are left unanimated.
+bool write_key(const std::string& path, const BafKey& k, const ModelOut& g, const Options& opts, size_t model_nodes)
 {
 	TextWriter mf;
 	std::string err;
@@ -2733,7 +2776,7 @@ bool write_key(const std::string& path, const BafKey& k, const ModelOut& g, cons
 	mf.printf("TYPE 0x%04X\n", k.type);
 	mf.printf("FRAMES %d\n", (int32_t)k.num_frames);
 	mf.printf("FPS %f\n", k.fps);
-	mf.printf("JOINTS %d\n", (int)k.joints.size());
+	mf.printf("JOINTS %d\n", (int)std::max(k.joints.size(), model_nodes));
 	mf.printf("\n");
 	mf.printf("\n");
 	mf.printf("###############\n");
@@ -2807,9 +2850,12 @@ int mat8_levels(int w, int h, size_t stored)
 // Indices are remapped from the texture's palette (`src`) into `dst`; an unmasked texture's
 // index 0 is an opaque colour and moves to its nearest other index, so it never turns into
 // JK's transparent key.
+// `error` receives the largest mean colour error of the material's textures: the RGB distance
+// (0..441) between each opaque texel's colour and the colour it got, averaged over the first mip.
 bool write_mat8_file(const std::string& path, const BafMaterial& m, const Palette& src, const Palette& dst,
-                     const jk::IndexSet& allowed, const std::string& baf)
+                     const jk::IndexSet& allowed, const std::string& baf, double& error)
 {
+	error = 0.0;
 	if (m.bpp != 8)
 	{
 		log::error_at(baf, m.offset, "material %s: %d bits per pixel; no 8-bit MAT\n", warn_name(m.name).c_str(), m.bpp);
@@ -2846,6 +2892,18 @@ bool write_mat8_file(const std::string& path, const BafMaterial& m, const Palett
 		}
 		else
 			table = jk::remap_table(src, dst, allowed, out.masked, kMat8Metric);
+		double sum = 0.0;
+		size_t opaque = 0;
+		for (uint8_t p : t.mips[0])
+		{
+			if (out.masked && p == 0)
+				continue;
+			const Rgb a = src.c[p], c = dst.c[table[p]];
+			sum += length((double)a.r - c.r, (double)a.g - c.g, (double)a.b - c.b);
+			opaque++;
+		}
+		if (opaque)
+			error = std::max(error, sum / (double)opaque);
 		for (size_t k = 0; k < t.mips.size() && k < (size_t)kMat8MipLevels; k++)
 		{
 			std::vector<uint8_t> level(t.mips[k]);
@@ -2904,6 +2962,41 @@ std::vector<std::string> mat8_names(const Baf& b)
 	return out;
 }
 
+// The colormap written for a BAF that has none: "<BAF file name up to its first '.'>.cmp" (the
+// name most retail colormaps have), or "<that>_<n>.cmp" when a name from the BAF already takes it.
+std::string own_cmp_name(const Baf& b)
+{
+	std::string stem = platform::base_name(b.file);
+	stem = stem.substr(0, stem.find('.'));
+	if (stem.empty())
+		stem = "colormap";
+	std::set<std::string> taken;
+	for (const BafMaterial& m : b.mats)
+		taken.insert(lower_ascii(m.name));
+	if (b.model_parsed)
+		taken.insert(lower_ascii(b.model.name));
+	for (const BafKey& k : b.keys)
+		taken.insert(lower_ascii(k.name));
+	std::string name = stem + ".cmp";
+	for (int n = 2; taken.count(lower_ascii(name)); n++)
+		name = stem + format("_%d.cmp", n);
+	return name;
+}
+
+bool write_retail_cmp(const std::string& szdump, const std::string& name, const Palette& pal, const std::string& baf)
+{
+	std::string path, why;
+	if (!out_path(szdump, name, baf, path))
+		return false;
+	jk::Cmp cmp;
+	if (!jk::build_cmp(pal, jk::CmpBuildOptions(), cmp, &why) || !jk::write_cmp(path, cmp, &why))
+	{
+		log::error("%s: %s\n", path.c_str(), why.c_str());
+		return false;
+	}
+	return true;
+}
+
 bool default_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data, const std::string& szdump,
                      const Options& opts, const Palette* fallback_palette, const BafExtras& extras)
 {
@@ -2911,25 +3004,36 @@ bool default_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data
 	bool ok = parse_baf(szfile, data, b);
 	std::string path, why;
 
-	// colormap: a retail CMP (light and transparency tables) under the BAF's colormap name
-	if (b.cmp_parsed)
-	{
-		if (out_path(szdump, b.cmp_name, szfile, path))
-		{
-			jk::Cmp cmp;
-			if (!jk::build_cmp(b.cmp_palette, jk::CmpBuildOptions(), cmp, &why) || !jk::write_cmp(path, cmp, &why))
-			{
-				log::error("%s: %s\n", path.c_str(), why.c_str());
-				ok = false;
-			}
-		}
-		else
-			ok = false;
-	}
-
 	// The palette of textures without their own: the colormap, else --palette or grayscale.
 	const Palette shared = b.has_colormap ? b.cmp_palette : (fallback_palette ? *fallback_palette : Palette::grayscale());
-	// The palette the 8-bit MATs index: --palette, else the colormap, else each texture's own.
+	// The palette every 8-bit MAT indexes: --palette, else the colormap, else (a BAF without a
+	// colormap) the first material's own palette, else the grayscale ramp of the original.
+	const BafMaterial* own_first = nullptr;
+	for (const BafMaterial& m : b.mats)
+		if (m.own_palette)
+		{
+			own_first = &m;
+			break;
+		}
+	const Palette mat8_palette = fallback_palette ? *fallback_palette
+		: b.has_colormap ? b.cmp_palette : own_first ? own_first->palette : shared;
+
+	// colormap: a retail CMP (light and transparency tables) under the BAF's colormap name. A BAF
+	// without a colormap gets one named after the BAF with the palette its 8-bit MATs index, so
+	// they come with the colormap they need, as every other BAF's do (not with --palette: the
+	// MATs then index that palette).
+	if (b.cmp_parsed)
+		ok = write_retail_cmp(szdump, b.cmp_name, b.cmp_palette, szfile) && ok;
+	else if (!b.has_colormap && opts.mat8 && !fallback_palette && !b.mats.empty())
+	{
+		const std::string name = own_cmp_name(b);
+		ok = write_retail_cmp(szdump, name, mat8_palette, szfile) && ok;
+		const std::string what = own_first ? "the palette of material " + warn_name(own_first->name)
+			: std::string("the grayscale palette");
+		log::verbose("%s: no colormap: %s holds %s, which the 8-bit MATs index\n", szfile.c_str(), name.c_str(),
+			what.c_str());
+	}
+
 	jk::IndexSet allowed;
 	allowed.set();
 	allowed.reset(0);
@@ -2938,6 +3042,9 @@ bool default_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data
 	const std::vector<std::string> names8 = mat8_names(b);
 
 	std::vector<std::string> mat_list;
+	unsigned off_colour = 0;          // 8-bit MATs over kMat8RemapWarnError
+	double worst_error = 0.0;
+	std::string worst_mat;
 	for (size_t i = 0; i < b.mats.size(); i++)
 	{
 		const BafMaterial& m = b.mats[i];
@@ -2972,22 +3079,42 @@ bool default_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data
 
 		if (opts.mat8)
 		{
-			const Palette& dst = fallback_palette ? *fallback_palette : (b.has_colormap ? b.cmp_palette : pal);
+			double error = 0.0;
 			if (out_path(szdump, names8[i], szfile, path))
-				ok = write_mat8_file(path, m, pal, dst, allowed, szfile) && ok;
+				ok = write_mat8_file(path, m, pal, mat8_palette, allowed, szfile, error) && ok;
 			else
 				ok = false;
+			log::debug("%s: material %s: mean colour error %.1f in %s\n", szfile.c_str(), warn_name(m.name).c_str(), error,
+				names8[i].c_str());
+			if (error > kMat8RemapWarnError)
+			{
+				off_colour++;
+				if (error > worst_error)
+				{
+					worst_error = error;
+					worst_mat = m.name;
+				}
+			}
 		}
 	}
-	if (opts.mat8 && !fallback_palette && !b.has_colormap && !b.mats.empty())
-		log::verbose("%s: no colormap: the 8-bit MATs keep their own palettes (use --palette to remap them)\n",
-			szfile.c_str());
+	if (off_colour)
+		log::warn("%s: %u 8-bit MAT(s) lose their colours in the palette they index (%s): mean RGB error over %.0f, "
+			"worst %s at %.1f of 441\n", szfile.c_str(), off_colour, fallback_palette ? "--palette" : "the BAF's colormap",
+			kMat8RemapWarnError, warn_name(worst_mat).c_str(), worst_error);
 
+	// The 3DO and the KEYs carry the applied draw scale in their names when it is not 1; the
+	// debug dumps keep the BAF's own names (they show its records, unscaled).
 	ModelOut g;
 	init_model_out(b, opts, extras, g);
+	if (!g.name_suffix.empty() && (b.model_parsed || !b.keys.empty()))
+		log::info("%s: drawn at scale %.2f: its 3DO and KEYs are named *%s.* (JK holds one model or key per name, "
+			"and other BAFs may share these names at another scale)\n", szfile.c_str(), (double)g.draw_scale,
+			g.name_suffix.c_str());
+	std::string out_name;
 	if (b.model_parsed)
 	{
-		const bool name_ok = out_path(szdump, b.model.name, szfile, path);
+		const bool name_ok = out_path(szdump, b.model.name, szfile, path) &&
+			out_path(szdump, scaled_name(b.model.name, g.name_suffix), szfile, out_name);
 		if (name_ok && opts.debug_dumps)
 		{
 			TextWriter mf;
@@ -3006,7 +3133,7 @@ bool default_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data
 		{
 			compute_model(b, opts, extras, g);
 			if (name_ok)
-				ok = write_model_3do(path, b, g, mat_list) && ok;
+				ok = write_model_3do(out_name, b, g, mat_list) && ok;
 		}
 		if (!name_ok)
 			ok = false;
@@ -3016,7 +3143,8 @@ bool default_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data
 
 	for (const BafKey& k : b.keys)
 	{
-		if (!out_path(szdump, k.name, szfile, path))
+		if (!out_path(szdump, k.name, szfile, path) || !out_path(szdump, scaled_name(k.name, g.name_suffix), szfile,
+			out_name))
 		{
 			ok = false;
 			continue;
@@ -3035,7 +3163,11 @@ bool default_dumpbaf(const std::string& szfile, const std::vector<uint8_t>& data
 				ok = false;
 			}
 		}
-		ok = write_key(path, k, g, opts) && ok;
+		const size_t model_nodes = b.model_parsed ? b.model.nodes.size() : 0;
+		ok = write_key(out_name, k, g, opts, model_nodes) && ok;
+		if (k.joints.size() < model_nodes)
+			log::verbose("%s: key %s animates %u of the model's %u hierarchy nodes (JOINTS %u)\n", szfile.c_str(),
+				warn_name(k.name).c_str(), (unsigned)k.joints.size(), (unsigned)model_nodes, (unsigned)model_nodes);
 		if (b.model_parsed && k.joints.size() > b.model.nodes.size())
 			log::warn_at(szfile, k.offset, "key %s animates %u joints; the model has %u hierarchy nodes\n",
 				warn_name(k.name).c_str(), (unsigned)k.joints.size(), (unsigned)b.model.nodes.size());
@@ -3069,7 +3201,12 @@ bool process_baf(const std::string& baf_path, const std::string& out_dir, const 
 {
 	BafExtras extras;
 	extras.draw_scale = opts.draw_scale;
-	extras.animated_radius = opts.radius.mode == RadiusMode::Animated;
+	// The computed RADIUS also covers the keys with --insert-offset node0: the re-rooted model's
+	// origin is node 0 (the pelvis of TPM's people), and their keys swing limbs and weapons past
+	// the rest-pose RADIUS around it (in 164 of the 303 retail BAFs), so JK, which culls the whole
+	// model with that sphere, would drop actors while they are on screen.
+	extras.animated_radius = opts.radius.mode == RadiusMode::Animated ||
+		(opts.radius.mode == RadiusMode::Computed && opts.insert_offset.mode == InsertOffsetMode::Node0);
 	return process_baf(baf_path, out_dir, opts, fallback_palette, extras);
 }
 

@@ -232,8 +232,9 @@ fixes them.
   decompressor handed the same input again when a truncated file asked for more, so it decoded
   garbage instead of failing.
 
-Still the same in both modes: the raw `.mat` copies of materials that carry their own palette
-leave that palette out (as stored in the BAF); `<base>8.mat` is the JK-ready file.
+The raw `.mat` copy of a material that carries its own palette keeps that palette in default mode,
+after the pixels where JK's loader reads it; the original left it out, and `--legacy` still does.
+`<base>8.mat` is the file retail JK draws through the level's colormap.
 
 ## Building
 

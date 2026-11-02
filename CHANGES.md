@@ -117,9 +117,9 @@ behaviour and refuses it on the command line):
 - **Debug dumps** (`.3do.txt`, `.key.txt`, `REMAIN.HEX`) keep the original's text format; for every
   BAF except the colormap-less one they are byte-identical to `--legacy`.
 - BMP rows are padded to 4 bytes, as the BMP format requires. No retail texture is affected.
-- Unchanged: raw `.mat` copies (materials with their own palette still omit it, as stored in the
-  BAF), the BMP previews' colours, the 16-bit MATs, KEY text (apart from the draw scale and the
-  `node0` re-root).
+- Unchanged: raw `.mat` copies (except that a material with its own palette keeps it), the BMP
+  previews' colours, the 16-bit MATs, KEY text (apart from the draw scale, the `node0` re-root and
+  the JOINTS count).
 
 ### BAF output in `--legacy`
 
