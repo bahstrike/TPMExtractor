@@ -88,7 +88,8 @@ file. The tool waits for a key before exiting only with `--pause` (the original 
 --legacy               reproduce the original TPMExtractor output byte for byte
 --scale F              scale for 3DO/KEY positions (default 0.2)
 --[no-]draw-scale      also multiply positions by the BAF's own draw scale
-                       (header +0xAC), as the game does (default on)
+                       (header +0xAC), as the game does (default on); a 3DO or
+                       KEY drawn at a scale other than 1 is named *_s<hundredths>
 --angles M             raw (default: TPM stores degrees) or rad2deg (never right
                        for TPM data; for experiments)
 --insert-offset M      auto (default: re-root at hierarchy node 0 when it lies above
@@ -96,8 +97,10 @@ file. The tool waits for a key before exiting only with `--pause` (the original 
                        creatures then stand on the floor in JK when their template
                        has size= at most the INSERT OFFSET z - 0.005), floor (the
                        lowest point; props), node0, zero, legacy, or X,Y,Z
---radius M             computed (default; rest pose), animated (also covers every
-                       key frame), stored (TPM's own), legacy (0.1), or a value
+--radius M             computed (default: the rest pose, and every key frame of a
+                       model that auto or node0 re-roots), animated (every key
+                       frame of every model), stored (TPM's own), legacy (0.1),
+                       or a value
 --[no-]mat8            retail 8-bit MATs, used by the 3DOs (default on)
 --[no-]mat16           16-bit MATs for OpenJKDF2/MotS testing (default on)
 --[no-]bmp             BMP previews (default on)
@@ -123,8 +126,10 @@ DumpDir/localizelab/<entry>     every file of LOCALIZE.LAB
 DumpDir/voicelab/<entry>        every file of VOICE.LAB
 DumpDir/LEVEL/<NAME>/<i>.bmp    the level's textures, in their own palettes
 DumpDir/BAF/<name>/             one folder per BAF:
-    <colormap>.cmp              the BAF's colormap (default mode: a retail JK CMP)
-    <mat>.mat                   raw copy of each material as stored in the BAF
+    <colormap>.cmp              the BAF's colormap (default mode: a retail JK CMP; a BAF
+                                without one gets <name>.cmp, the palette its MATs index)
+    <mat>.mat                   raw copy of each material as stored in the BAF (default
+                                mode: with the palette a material of its own carries)
     <base>.bmp                  preview of the material's first texture
     <base>8.mat                 retail JK 8-bit MAT (default mode; the 3DO uses it)
     <base>16.mat                16-bit MAT (OpenJKDF2 and Mysteries of the Sith only)
@@ -133,6 +138,12 @@ DumpDir/BAF/<name>/             one folder per BAF:
     *.3do.txt, *.key.txt        debug dumps of the parsed structures
     REMAIN.HEX                  the bytes after the last parsed structure
 ```
+
+In default mode a BAF drawn at a scale other than 1 writes its model and keys as
+`<model>_s<hundredths>.3do` and `<key>_s<hundredths>.key` (for example `walk_s110.key` at 1.1):
+the positions in those files include that scale, and other BAFs use the same model or key names
+unscaled or at another scale. The tool prints which BAFs this applies to. Debug dumps keep the
+BAF's own names.
 
 **Using the output in retail Jedi Knight.** JK 1.0/1.01 draws 8-bit MATs through the colormap of
 the level, so a MAT shows its true colours only with the palette its indices refer to. By default
@@ -155,8 +166,19 @@ the floor, as `floor` does: a person then hangs node 0's height below its origin
 OFFSET` z is that height. Give the template a `size=` of at most `INSERT OFFSET z - 0.005`; with a
 larger `size=`, or none, it still floats. `auto` re-roots by node 0's height rounded to 1/1000 of
 a model unit, so BAFs that share a key still write identical keys (`node0` re-roots by the exact
-height). On a retail disc `auto` re-roots 250 of the 303 models; the others have node 0 at their
-origin and get exactly the `floor` output.
+height). On a retail disc `auto` re-roots 250 of the 303 models; the others have node 0 at or
+below their origin and get exactly the `floor` output. A re-rooted model's `RADIUS` also covers
+every frame of its keys, since JK culls the whole model with that sphere around its origin; for
+the others, `--radius animated` does the same.
+
+**Several actors in one game.** JK keeps one model, key, MAT and colormap per file name, so two
+different files with the same name cannot be used side by side: the first one loaded wins.
+Default mode never gives the same name to files that differ only because of the fork (the draw
+scale above). TPM itself, however, stores different data under some names in different BAFs: on a
+retail disc, different BAFs write 64 key, 9 model, 251 raw MAT and 2 colormap names with
+different contents (as the original tool did), and 260 8-bit MAT names (191 with `--palette`,
+which maps every MAT into one palette). When you install actors from several BAFs together,
+rename such files, and the references to them in 3DOs, PUPs and templates.
 
 ## What `--legacy` does
 
@@ -191,13 +213,15 @@ The summary; [CHANGES.md](CHANGES.md) has the details.
 - **Default-mode BAF output for JK** (`--legacy` gives the original output; several items also
   have their own option):
   - the real BAF layout is read, so the one colormap-less BAF on the retail disc gets its model;
-  - computed 3DO `RADIUS` values (JK's rules) instead of the placeholder 0.1, optionally also
-    covering every animation frame (`--radius animated`);
+  - computed 3DO `RADIUS` values (JK's rules) instead of the placeholder 0.1; for re-rooted
+    models also covering every animation frame (for every model with `--radius animated`);
   - a re-root at hierarchy node 0 for models whose node 0 lies above their origin, then the lowest
     point on the floor (`INSERT OFFSET`), so that people and creatures stand on the floor in JK
     (`--insert-offset auto`, the default; see "Standing on the floor");
-  - positions multiplied by each BAF's own draw scale, as the game draws it (`--no-draw-scale`
-    turns this off);
+  - positions multiplied by each BAF's own draw scale, as the game draws it, with the scale in
+    the names of the models and keys it changes (`--no-draw-scale` turns this off);
+  - KEY files whose `JOINTS` covers every node of the model, which JK's animation code expects;
+  - for the BAF without a colormap, a colormap with the palette its 8-bit MATs index;
   - the real hierarchy node types (so partial-body animations blend as authored), perspective
     texture mode (`TEXTUREMODE 3`), and face flags limited to the ones JK uses;
   - retail JK colormaps (version 30, with light and transparency tables, 82,752 bytes) instead of
@@ -231,8 +255,8 @@ fixes them.
 - **Placeholder 3DO values.** `RADIUS 0.1`, `INSERT OFFSET 0 0 0.1` and hierarchy type `0x1` are
   written although the file has the real values. 209 of the 302 models the original writes reach
   farther than 0.1 from their origin, so JK culls them while parts are still on screen.
-- **Draw scale ignored.** Each BAF stores the scale the game draws it at; 134 retail BAFs have one
-  other than 1.
+- **Draw scale ignored.** Each BAF stores the scale the game draws it at; 54 retail BAFs are drawn
+  at a scale other than 1 (0.5 to 3.0). Another 80 store 1.0 a few millionths too high.
 - **Uninitialised memory in the debug dumps.** When the last 64-byte read hits the end of the file,
   the original printed whatever was on the stack (153 files).
 - **32-bit Windows only.** The file structures were read straight into C structs with a pointer

@@ -56,10 +56,10 @@ behaviour and refuses it on the command line):
 | Option | Default | Effect |
 |---|---|---|
 | `--scale F` | 0.2 | scale for 3DO/KEY positions (Strike's world scale) |
-| `--[no-]draw-scale` | on | also multiply positions by the BAF's own draw scale (header +0xAC) |
+| `--[no-]draw-scale` | on | also multiply positions by the BAF's own draw scale (header +0xAC, in hundredths); a 3DO or KEY drawn at a scale other than 1 is named `<name>_s<hundredths>` |
 | `--angles raw\|rad2deg` | raw | TPM stores degrees with JK's pitch/yaw/roll; `rad2deg` (the original's disabled experiment) is never right for TPM data and warns |
 | `--insert-offset M` | auto | `auto` (re-root at node 0 when node 0 lies above the origin, then `floor`), `floor` (the lowest point on the floor; props), `node0` (re-root at node 0), `zero`, `legacy` (0,0,0.1), or `X,Y,Z` |
-| `--radius M` | computed | `computed` (rest pose), `animated` (also every key frame), `stored` (TPM's own), `legacy` (0.1), or a value |
+| `--radius M` | computed | `computed` (rest pose; for a model `auto` or `node0` re-roots, also every key frame), `animated` (every key frame of every model), `stored` (TPM's own), `legacy` (0.1), or a value |
 | `--[no-]mat8` | on | retail 8-bit MATs `<base>8.mat`, named by the 3DOs |
 | `--[no-]mat16` | on | 16-bit MATs `<base>16.mat` (OpenJKDF2 and MotS only) |
 | `--[no-]bmp` | on | BMP previews |
@@ -81,12 +81,22 @@ behaviour and refuses it on the command line):
   structural error is reported with file and offset and stops that file; what was parsed before
   it is still written.
 - **The colormap-less BAF** (one on the retail disc) gets its model: the original read its model
-  as a key and wrote a key-format `.3do`.
+  as a key and wrote a key-format `.3do`. It also gets a retail CMP with the palette its 8-bit
+  MATs index (the palette of its first material that has its own), named after the BAF
+  (`<BAF name>.cmp`, or `<BAF name>_<n>.cmp` if a material, model or key of the BAF has that
+  name), so it comes with the colormap it needs like every other BAF. Not with `--palette`,
+  whose palette the MATs index instead.
 - **RADIUS** is computed with JK's rules (OpenJKDF2 `rdModel3_CalcRadii`): mesh radius = 1.1 x the
   farthest vertex from the mesh origin; model radius = 1.1 x the farthest vertex from the model
   origin after the rest-pose hierarchy transform (`World(parent) T(-parent.pivot) T(pos) R T(pivot)`),
   after scaling. `--radius animated` also covers every integer frame of every key of the BAF
-  (animation moves vertices past the rest-pose radius in about 40% of the retail actors).
+  (animation moves vertices past the rest-pose radius in about 40% of the retail actors). JK
+  culls the whole model with this sphere around its origin and never recomputes it, so with
+  `--radius computed` a model that `auto` or `node0` re-roots also gets the key-covering radius:
+  its origin is then node 0, and the keys reach past the rest-pose radius around it in 164 of the
+  303 retail BAFs. With the defaults, the RADIUS of 294 of the 303 retail models covers every
+  frame of their keys; 9 models that are not re-rooted are outgrown by theirs (4 by more than
+  10%), which `--radius animated` fixes.
   `--radius stored` uses TPM's model radius and warns when it is smaller than the model (115 retail
   BAFs); mesh radii are then still computed, since TPM's mesh radius is centred elsewhere.
 - **INSERT OFFSET**: `floor` puts the lowest rest-pose point on the floor (right for props).
@@ -106,11 +116,28 @@ behaviour and refuses it on the command line):
   `--radius computed`, a re-rooted model's RADIUS covers its keys, as with `node0`. On the retail
   disc `auto` re-roots 250 of the 303 models; the 133 two-legged rigs stand on the floor with a
   body-sized `size=` (lowest point within 5% of their height of the floor in 130, none sunk into it),
-  where `floor` left 132 hovering and `node0` sank one below the floor. No key or model name that
-  several BAFs share gets different contents.
+  where `floor` left 132 hovering and `node0` sank one below the floor. The rounding means that
+  no key or model name that several BAFs share, and that the original wrote with the same bytes,
+  gets different contents.
 - **Draw scale**: positions (vertices, hierarchy positions and pivots, KEY positions and position
-  deltas) are multiplied by `--scale` x the BAF's draw scale, as the game draws the actor. This
-  changes 134 retail BAFs, 54 of them by more than 1e-4 (`--no-draw-scale` turns it off).
+  deltas) are multiplied by `--scale` x the BAF's draw scale, as the game draws the actor
+  (`--no-draw-scale` turns it off). The draw scale is applied in hundredths: 134 retail BAFs
+  store one other than exactly 1.0, but 80 of them store 1.0 about 1e-5 too high, so 54 are drawn
+  at another scale (0.5 to 3.0). JK keeps one model and one key per name, and other BAFs use the
+  same model and key names unscaled or at another scale, so a 3DO or KEY written at a draw scale
+  other than 1 is named `<name>_s<hundredths>.<ext>` (`_s110` for 1.1) and the tool prints which
+  BAFs this applies to (on the retail disc 54 3DOs and 446 KEYs). Debug dumps keep the BAF's own
+  names.
+- **KEY JOINTS** is at least the model's number of hierarchy nodes: JK allocates JOINTS joints
+  for a key, and its animation code reads the joint at every node's index (the retail engine
+  without a bounds check). `NODES` stays the number of joints written; 3 retail keys animate
+  fewer nodes than their model has.
+- **Names shared by several BAFs**: default mode never gives the same 3DO or KEY name to files
+  that differ only because of the fork (the real-data test checks that every name the original
+  wrote with the same bytes for several BAFs still has the same bytes). TPM itself stores
+  different data under some names: on the retail disc, different BAFs write 64 KEY, 9 3DO, 251
+  raw MAT and 2 CMP names with different contents (as the original did), and 260 8-bit MAT names
+  (191 with `--palette`). The README tells users to rename them when they combine actors.
 - **3DO values**: the real hierarchy node types (+0x48; partial-body animations then blend as
   authored), `TEXTUREMODE 3` (perspective) for meshes and faces, face flags masked to 0x3 (the
   bits retail JK uses), and `RADIUS %f` / `INSERT OFFSET %f %f %f` without the `# dunno` comments.
@@ -126,7 +153,12 @@ behaviour and refuses it on the command line):
   `--palette`, every material is remapped into that palette, avoiding its glowing colours. The 3DO
   `MATERIALS` list names the 8-bit MATs (with `--no-mat8`, the 16-bit ones as before; with
   `--no-mat16` as well, the tool warns that those files are not written). A name clash with a
-  raw MAT gets `<base>8_<n>.mat` and a warning (none on the retail disc).
+  raw MAT gets `<base>8_<n>.mat` and a warning (none on the retail disc). A warning names the BAF
+  and its worst material when 8-bit MATs lose their colours in the palette they index (a mean RGB
+  error over 48 on a scale of 0 to 441; 18 retail BAFs get it in default mode).
+- **Raw MAT copies**: the copy of a material with its own palette (type 3; 435 on the retail disc)
+  keeps the 768-byte palette after the pixels, where JK's loader reads it. The original left it
+  out, so JK read past the end of those files; `--legacy` still leaves it out.
 - **Angles** stay raw: TPM stores degrees with JK's rotation order (verified against the game's
   matrix code and the data), so no conversion is needed.
 - **Debug dumps** (`.3do.txt`, `.key.txt`, `REMAIN.HEX`) keep the original's text format; for every
