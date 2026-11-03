@@ -55,7 +55,7 @@ behaviour and refuses it on the command line):
 
 | Option | Default | Effect |
 |---|---|---|
-| `--scale F` | 0.2 | scale for 3DO/KEY positions (Strike's world scale) |
+| `--scale F` | 0.2 | scale for 3DO/KEY positions (Strike's world scale) and for level OBJ positions |
 | `--[no-]draw-scale` | on | also multiply positions by the BAF's own draw scale (header +0xAC, in hundredths); a 3DO or KEY drawn at a scale other than 1 is named `<name>_s<hundredths>` |
 | `--angles raw\|rad2deg` | raw | TPM stores degrees with JK's pitch/yaw/roll; `rad2deg` (the original's disabled experiment) is never right for TPM data and warns |
 | `--insert-offset M` | auto | `auto` (re-root at node 0 when node 0 lies above the origin, then `floor`), `floor` (the lowest point on the floor; props), `node0` (re-root at node 0), `zero`, `legacy` (0,0,0.1), or `X,Y,Z` |
@@ -65,6 +65,8 @@ behaviour and refuses it on the command line):
 | `--[no-]bmp` | on | BMP previews |
 | `--palette FILE` | none | `.cmp` or 768-byte `.pal`: the palette of colormap-less BAFs, and the palette every 8-bit MAT is remapped into |
 | `--[no-]debug-dumps` | on | `*.3do.txt`, `*.key.txt`, `REMAIN.HEX` |
+| `--geometry obj\|none` | obj | each level's geometry as `<NAME>.obj` and `<NAME>.mtl` next to its textures (see Levels) |
+| `--geometry-texture-rule game\|mat` | game | the texture of each OBJ face: `game` the one the game draws the polygon with, `mat` always its UV mapping's |
 | `--keep-decompressed` | off | keep `big.lab` and `LEVEL/<NAME>/<NAME>.dec` |
 | `--[no-]pause` | off | wait for a key before exiting |
 | `-v`, `-vv`, `-q` | | verbose, debug, quiet |
@@ -191,8 +193,46 @@ behaviour and refuses it on the command line):
   `--keep-decompressed` (default mode) keeps `<NAME>.dec`.
 - Level files embed no other files: `DFLT.CMP`, `DFLT.MAT` and the BMP, TXT and SPR files are
   `big.lab` entries, written to `biglab/` in both modes.
-- `b3d.h` exposes the section walk, named header fields and level loading for a future geometry
-  decoder.
+- `b3d.h` exposes the section walk, named header fields and level loading.
+- **Level geometry** (new; default mode, `--geometry obj`): `b3d`, `b3dall` and the disc run write
+  each level's geometry as `<NAME>.obj` and `<NAME>.mtl` next to its textures. The original never
+  decoded it. The decoder (`b3d_geom.cpp`) follows the fork's level-geometry specification,
+  recovered by static analysis of the game's level loader and renderer (never run) and checked on
+  every retail level:
+  - It reads only the game part of the section chain, `B3D FILE` to `B3D_END1`, as the game does:
+    `B3D_GMAP` (a grid of cells holding 64-byte polygon records, and LINK entries naming polygons
+    that also cover other cells), `B3D_GVRT` (vertices), `B3D_MAT ` (UV mappings onto the
+    textures), `B3D_TEX ` and `B3D_AMAP` (which polygons the moving objects move).
+  - Every count, record size and index is checked against the header and the file. A level that
+    fails gets no OBJ/MTL and an error naming the file and the offset in the decompressed image;
+    its textures are still written. Header versions 278 to 292 are read with a warning; older
+    ones (another polygon layout) and newer ones (refused by the game too) are refused.
+  - One `v` per vertex, in stored order, without welding: position x `--scale`, computed as the
+    exact product of the two float32 values so that every platform writes the same digits.
+  - One face per polygon (triangles and quads), grouped as `static`, `amap<k>` (moved by moving
+    object k, at their stored rest position) and `hidden`, in grid order within each group.
+  - Faces run counter-clockwise around the side the game draws. TPM stores polygons clockwise
+    around their normal, except 1,293 retail polygons, which keep their order; vertex 0 stays
+    first. Each face gets that side's normal (the 12 retail polygons that store a non-finite
+    normal get their facing axis) and its UVs (`vt`, with v flipped so that texture row 0 is at
+    the top).
+  - Materials `tex<i>` with `map_Kd <i>.bmp`, one per texture. `--geometry-texture-rule game`
+    (the default) binds the texture the game binds: the polygon's own texture index when it is
+    opaque, its mapping's texture when it is blended. `mat` always binds the mapping's texture.
+    The two differ on 88 retail polygons.
+  - A polygon whose mapping or texture index is out of range (the game skips it), whose mapping
+    holds a non-finite UV, or a quad flagged as a triangle in its UV mode is written with the grey
+    material `untextured`, with a warning. No retail polygon is. LINK entries are checked (each
+    record must name a target; link ids must be unique), and problems are warnings.
+  - Numbers have 6 decimals, correctly rounded with ties to even, never `-0.000000`; lines end in
+    CRLF like the tool's other text files. A summary line per level gives the vertex, face, moving,
+    hidden, kept-order and untextured counts, the faces the other texture rule would texture
+    otherwise, and unresolved LINK records.
+  - On the retail disc: 11 levels, 435,560 vertices and 334,396 faces, none untextured, every
+    LINK record resolved. The files equal the tests' independent model byte for byte and the
+    specification's reference implementation line for line.
+  - `--legacy` never writes geometry and refuses the geometry options, so its output is
+    unchanged.
 
 ### Archives (.LAB, .Z)
 
@@ -261,10 +301,22 @@ behaviour and refuses it on the command line):
   original's output with the uninitialised tail lines masked) the `--legacy` identity test. Dumps
   go outside the source tree and are deleted.
 - Unit tests: `unit_layer` (platform, BMP, reader, options), `unit_textout` (number formatting),
-  `unit_jkout` (MAT and CMP encoders), `unit_b3d_decompress` (the level decoder).
+  `unit_jkout` (MAT and CMP encoders), `unit_b3d_decompress` (the level decoder), `unit_b3d_geom`
+  (the geometry decoder and OBJ/MTL writer: number format, UV corner tables, normals and winding,
+  texture rules, LINK checks, error offsets of damaged levels).
+- Level geometry: `make_fixtures.py` builds the specification's synthetic test vector (14 abstract
+  polygons on a 5 x 3 grid with generated palettes and pixels, covering every UV mode, both
+  texture rules, LINK entries, moving and hidden polygons and the special cases), pinned by
+  SHA-256, and holds an independent model of the decoder and the OBJ/MTL writer. The runner checks
+  the tool's OBJ/MTL against the model and the pinned data-line hashes (compressed and not, every
+  geometry option, `b3dall`, `--legacy`, usage errors), and runs the specification's mutation tests
+  plus the fork's own: each patched copy must be refused at the right offset, written with
+  untextured faces, or written with a warning. With `TPM_DISC`, every level's OBJ/MTL is compared
+  with the model byte for byte, and the disc run with `b3dall`.
 - Fuzz targets `tests/fuzz_*.cpp` with libFuzzer (clang) or a replay driver (`-DTPMX_FUZZ=ON`):
-  in memory the LAB directory, the B3D section walk and LZSS decoder, and CMPs; and through the
-  tool's file entry points, BAF files (`fuzz_baf`: both parsers and every BAF writer, in
+  in memory the LAB directory, the B3D section walk and LZSS decoder, the level geometry decoder
+  with its OBJ text (`fuzz_b3d_geom`), and CMPs; and through the tool's file entry points, BAF
+  files (`fuzz_baf`: both parsers and every BAF writer, in
   `--legacy` and default mode with the BAF options), levels (`fuzz_b3d_file`: default,
   `--keep-decompressed`, `--legacy`), LAB extraction (`fuzz_lab_file`) and `.Z` extraction
   (`fuzz_z`). The file-level targets run in a scratch folder of their own and fail when anything
@@ -283,7 +335,7 @@ behaviour and refuses it on the command line):
 |---|---|
 | `main.cpp` | options, `--legacy`, commands, level scan, exit codes; same steps and output names as before |
 | `baf.*` | real BAF layout in default mode, JK-ready 3DO/KEY values, retail CMPs and 8-bit MATs; bounded legacy read |
-| `b3d.*`, `b3d_decompress.*` | in-memory decoder with limits, section walk, checked textures |
+| `b3d.*`, `b3d_decompress.*` | in-memory decoder with limits, section walk, checked textures, level geometry export |
 | `lab.*` | bounds-checked LAB reader, stored or sequential layout |
 | `CMP.h`, `CMP.cpp` | removed (replaced by `jk::legacy_cmp`, byte-identical) |
 | `unshieldv3/ISArchiveV3.cpp`, `blast.c`, `unshieldv3.cpp` | see Archives and Robustness |
@@ -292,5 +344,6 @@ behaviour and refuses it on the command line):
 | new: `platform.*`, `textout.*`, `bmp.*`, `image.*`, `binreader.*`, `log.*`, `options.*` | portability layer, output writers, options |
 | new: `zextract.*` | `.Z` extraction |
 | new: `jkout.*` | retail JK MAT and CMP writers, nearest-colour remapping, mipmaps |
+| new: `b3d_geom.*` | level geometry decoder and OBJ/MTL writer |
 | new: `tests/` | unit tests, end-to-end runner, fixture generator, fuzz targets |
 | new: `CMakeLists.txt`, `Makefile`, `cmake/*.cmake`, `.gitignore`, `CHANGES.md`, `NOTICE` | build files and documentation |

@@ -4,9 +4,10 @@
 > [bahstrike/TPMExtractor](https://github.com/bahstrike/TPMExtractor) by Strike (Bad Ass Hackers,
 > 2021-2024), based on its commit `2cc75d6`. The fork no longer needs Windows to build (it is
 > tested on Linux and with MinGW for Windows), fixes crashes and parsing bugs, adds commands for
-> single files, and writes models and textures that retail Jedi Knight can load. The original
-> program's output is still available, byte for byte, with `--legacy`. This README was rewritten
-> for the fork in 2026; every change is listed in [CHANGES.md](CHANGES.md). The original
+> single files, writes models and textures that retail Jedi Knight can load, and exports the
+> levels' geometry, which the original never decoded, as OBJ models. The original program's
+> output is still available, byte for byte, with `--legacy`. This README was rewritten for the
+> fork in 2026; every change is listed in [CHANGES.md](CHANGES.md). The original
 > description, credits and disclaimer are kept below.
 >
 > Fork improvements (2026): Andrei Kiralv/Darkahn, with Claude (Anthropic), Red in Andrei's
@@ -32,7 +33,8 @@ TPMExtractor is capable of processing these incoming data directly from the inst
 
 The output is meant for Jedi Knight: Dark Forces II ("JK") modding: models become JK `.3do` files,
 animations `.key` files, textures `.mat` files with `.cmp` colormaps, and every texture is also
-written as a `.bmp` preview.
+written as a `.bmp` preview. Each level's geometry becomes a Wavefront OBJ model (`<NAME>.obj` with
+its `<NAME>.mtl`) textured with the level's `.bmp` files, for Blender and other 3D tools.
 
 ## Usage
 
@@ -65,7 +67,7 @@ tpmextractor [options] COMMAND INPUT OUTDIR
 | `all DiscDir DumpDir` | the whole disc: `GAMEDATA/GOBS/BIG.Z` -> `big.lab` -> `DumpDir/biglab/`, `LOCALIZE.LAB` -> `localizelab/`, `VOICE.LAB` -> `voicelab/`, `GAMEDATA/LEVEL/*.B3D` -> `LEVEL/<NAME>/`, `biglab/*.baf` -> `BAF/<name>/` |
 | `z FILE.Z OUTDIR` | every file of an InstallShield v3 archive (`BIG.Z` holds `big.lab`) |
 | `lab FILE.LAB OUTDIR` | every file of a LAB archive (`big.lab`, `LOCALIZE.LAB`, `VOICE.LAB`) |
-| `b3d FILE.B3D OUTDIR` | one level's textures -> `OUTDIR/<NAME>/<i>.bmp` |
+| `b3d FILE.B3D OUTDIR` | one level -> `OUTDIR/<NAME>/`: its textures `<i>.bmp` and its geometry `<NAME>.obj` with `<NAME>.mtl` |
 | `b3dall DIR OUTDIR` | every `*.B3D` in `DIR` -> `OUTDIR/<NAME>/` |
 | `baf FILE.BAF OUTDIR` | one actor or object -> `OUTDIR/<name>/` |
 | `bafall DIR OUTDIR` | every `*.BAF` in `DIR` -> `OUTDIR/<name>/` |
@@ -89,7 +91,7 @@ file. The tool waits for a key before exiting only with `--pause` (the original 
 
 ```
 --legacy               reproduce the original TPMExtractor output byte for byte
---scale F              scale for 3DO/KEY positions (default 0.2)
+--scale F              scale for 3DO/KEY and level OBJ positions (default 0.2)
 --[no-]draw-scale      also multiply positions by the BAF's own draw scale
                        (header +0xAC), as the game does (default on); a 3DO or
                        KEY drawn at a scale other than 1 is named *_s<hundredths>
@@ -110,6 +112,11 @@ file. The tool waits for a key before exiting only with `--pause` (the original 
 --palette FILE         target palette (.cmp or 768-byte .pal) for the 8-bit MATs
                        and for BAFs that have no colormap
 --[no-]debug-dumps     *.3do.txt, *.key.txt and REMAIN.HEX (default on)
+--geometry M           obj (default: each level's geometry as <NAME>.obj and
+                       <NAME>.mtl next to its textures) or none
+--geometry-texture-rule R
+                       game (default: the texture the game draws each polygon
+                       with) or mat (always its mapping's texture)
 --keep-decompressed    keep big.lab and LEVEL/<name>/<name>.dec
 --[no-]pause           wait for a key before exiting (default off; the original
                        always waited)
@@ -128,6 +135,8 @@ DumpDir/biglab/<entry>          every file of big.lab (big.lab itself is deleted
 DumpDir/localizelab/<entry>     every file of LOCALIZE.LAB
 DumpDir/voicelab/<entry>        every file of VOICE.LAB
 DumpDir/LEVEL/<NAME>/<i>.bmp    the level's textures, in their own palettes
+DumpDir/LEVEL/<NAME>/<NAME>.obj the level's geometry (default mode), with its materials in
+DumpDir/LEVEL/<NAME>/<NAME>.mtl <NAME>.mtl, which name the <i>.bmp files
 DumpDir/BAF/<name>/             one folder per BAF:
     <colormap>.cmp              the BAF's colormap (default mode: a retail JK CMP; a BAF
                                 without one gets <name>.cmp, the palette its MATs index)
@@ -183,6 +192,31 @@ different contents (as the original tool did), and 260 8-bit MAT names (191 with
 which maps every MAT into one palette). When you install actors from several BAFs together,
 rename such files, and the references to them in 3DOs, PUPs and templates.
 
+**Level geometry.** In default mode each level's polygons are written as `<NAME>.obj`, with its
+materials in `<NAME>.mtl`, next to the level's textures (`--geometry none` turns this off;
+`--legacy` never writes them). The original program never decoded the geometry; its format was
+recovered for the fork by static analysis of the game's level loader and checked on every level of
+a retail disc.
+
+- **Axes and scale.** JK's axes: +X right, +Y forward, +Z up (in Blender's OBJ import, set the up
+  axis to Z and the forward axis to Y). Positions are multiplied by `--scale`, 0.2 by default as
+  for the models: one cell of the level's grid is one TPM unit and becomes 0.2 JK units.
+- **Vertices and faces.** Every vertex of the level is written once, in its stored order, without
+  welding. Each polygon is one face, a triangle or a quad (quads are not split), wound
+  counter-clockwise around the side the game draws, with that side's normal and texture
+  coordinates. Texture coordinates may run past 0..1 where the game repeats a texture.
+- **Materials.** Each texture is one material, `tex<i>`, drawn with `<i>.bmp`. With
+  `--geometry-texture-rule game` (the default) each polygon gets the texture the game draws it
+  with; `mat` gives it the texture its UV mapping names. The two differ on a few polygons (88 on a
+  retail disc, some of which look like mistakes in the game's data). A polygon whose UV mapping or
+  texture cannot be used (none on a retail disc) gets the grey material `untextured`, and the tool
+  says so.
+- **Objects.** Faces are grouped as `static`, then `amap<k>`, the polygons the level's moving
+  object `k` (a door, a lift) moves, at their stored rest position, then `hidden`, polygons the
+  game keeps hidden or switched off.
+- **Not in the OBJ:** the back side of two-sided polygons, translucency, texture animation,
+  lighting, collision and the motion of moving objects.
+
 ## What `--legacy` does
 
 `--legacy` reproduces the output of the original program (commit `2cc75d6`) byte for byte: the
@@ -232,9 +266,10 @@ The summary; [CHANGES.md](CHANGES.md) has the details.
     the original's 17,216-byte file with an empty light table;
   - retail 8-bit MATs `<base>8.mat` (with mipmaps, index 0 kept as the transparent colour only
     where the texture is masked), which the 3DOs now name.
-- **Levels:** the level decompressor works in memory, reports truncated files, and produces the
-  same bytes as before; the level file is walked section by section with every size checked;
-  `--keep-decompressed` keeps the decompressed `<NAME>.dec`.
+- **Levels:** each level's geometry, which the original never decoded, is written as an OBJ model
+  with its materials (`--geometry`, see "Level geometry"); the level decompressor works in memory,
+  reports truncated files, and produces the same bytes as before; the level file is walked section
+  by section with every size checked; `--keep-decompressed` keeps the decompressed `<NAME>.dec`.
 - **Archives:** LAB files are read through their stored offsets (the original assumed sequential
   storage); `.Z` files are decompressed with a size check, and a damaged one no longer ends the run.
 - **Tests:** unit tests and an end-to-end suite on generated, generic fixtures (boxes, pyramids,
@@ -337,10 +372,10 @@ them afterwards. `TPM_REF_MANIFEST` (a manifest of the original program's output
 uninitialised "tail" lines masked) adds the `--legacy` identity test.
 
 Fuzz targets (CMake with `-DTPMX_FUZZ=ON`, best with clang and `-DTPMX_SANITIZE=ON`) cover every
-input the tool reads: BAF files through all their writers in both modes, levels, LAB and `.Z`
-archives and colormaps. The file-level ones fail when anything is written outside their output
-folder. `ctest -L fuzz` runs each one briefly on generated seeds; `tests/CMakeLists.txt` shows how
-to run them for longer.
+input the tool reads: BAF files through all their writers in both modes, levels and their
+geometry, LAB and `.Z` archives and colormaps. The file-level ones fail when anything is written
+outside their output folder. `ctest -L fuzz` runs each one briefly on generated seeds;
+`tests/CMakeLists.txt` shows how to run them for longer.
 
 ## License
 

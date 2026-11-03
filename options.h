@@ -87,10 +87,25 @@ struct InsertOffsetOption
     float x = 0.0f, y = 0.0f, z = 0.0f;  // only for Fixed
 };
 
+// Level geometry (b3d_geom.h).
+enum class GeometryMode {
+    None,  // textures only, as the original. --legacy.
+    Obj,   // also <NAME>.obj and <NAME>.mtl next to the level's <i>.bmp textures. Default.
+};
+
+// Which B3D_TEX page a polygon's face is textured with in the OBJ.
+enum class GeometryTextureRule {
+    Game,  // the page the game draws: the polygon's own texture index (+0x24) when it is opaque,
+           // its mapping's page when it is blended. Default.
+    Mat,   // always its mapping's page. The two differ on a few opaque polygons (88 on the
+           // retail disc), some of which look like glitches in the game.
+};
+
 struct Options
 {
     bool legacy = false;              // --legacy: reproduce 2cc75d6 byte for byte
     float scale = 0.2f;               // position scale for 3DO/KEY output (Strike's worldScale)
+                                      // and for level OBJ files
     bool draw_scale = true;           // also multiply positions by each BAF's own draw scale
                                       // (header +0xAC), as the game draws the actor. --legacy: off
     AngleMode angles = AngleMode::Raw;
@@ -101,6 +116,8 @@ struct Options
     bool bmp = true;                  // write BMP previews
     std::string palette;              // target palette file (.cmp or raw .pal); "" = automatic
     bool debug_dumps = true;          // write *.3do.txt, *.key.txt and REMAIN.HEX
+    GeometryMode geometry = GeometryMode::Obj;  // level geometry. --legacy: None
+    GeometryTextureRule geometry_texture_rule = GeometryTextureRule::Game;
     bool keep_decompressed = false;   // keep big.lab and LEVEL/<L>/<L>.dec
     bool pause = false;               // wait for a key before exiting
     int verbose = 0;                  // -1 quiet, 0 normal, 1 verbose, 2 debug
@@ -108,8 +125,8 @@ struct Options
 
 // Sets every output-affecting field to the original tool's behaviour (legacy = true,
 // scale 0.2, draw_scale off, angles Raw, insert offset Fixed (0,0,0.1), radius Fixed 0.1, mat8
-// off, mat16 on, bmp on, palette "", debug dumps on, keep_decompressed off). pause and verbose
-// are kept.
+// off, mat16 on, bmp on, palette "", debug dumps on, geometry None, keep_decompressed off).
+// pause and verbose are kept.
 void apply_legacy(Options& o);
 
 struct ParsedArgs

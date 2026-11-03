@@ -4,10 +4,11 @@
 // Version 2.0 (see LICENSE). New file in the fork (see CHANGES.md).
 //
 // Built only with -DTPMX_FUZZ=ON (see tests/CMakeLists.txt). The input is the level file
-// LVL.B3D (fuzz_b3d covers the in-memory section walk and decoder; this target covers the
-// whole level run: loading, texture output, the .dec file and its removal). After every run
-// nothing may be written outside the output folder (fuzz/sandbox.h), and the output folder
-// may hold only LVL/, <n>.bmp files in it, and LVL/LVL.dec with --keep-decompressed.
+// LVL.B3D (fuzz_b3d covers the in-memory section walk and decoder, fuzz_b3d_geom the geometry
+// decoder; this target covers the whole level run: loading, texture output, the geometry files,
+// the .dec file and its removal). After every run nothing may be written outside the output
+// folder (fuzz/sandbox.h), and the output folder may hold only LVL/, <n>.bmp files in it,
+// LVL/LVL.obj and LVL/LVL.mtl in default mode, and LVL/LVL.dec with --keep-decompressed.
 
 #include "b3d.h"
 #include "fuzz/sandbox.h"
@@ -56,6 +57,11 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
             }
             if (!e.is_dir && e.path.compare(0, 4, "LVL/") == 0 && is_bmp_name(e.path.substr(4)))
                 continue;
+            if (!e.is_dir && (e.path == "LVL/LVL.obj" || e.path == "LVL/LVL.mtl")) {
+                if (o.legacy)
+                    tpmx_fuzz::violation("geometry written with --legacy", e.path);
+                continue;
+            }
             tpmx_fuzz::violation("unexpected level output", e.path);
         }
         sb.clean_out();

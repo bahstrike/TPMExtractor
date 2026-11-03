@@ -1,8 +1,8 @@
 // Strike
 // Bad Ass Hackers 2021-2024
 // Modified 2026 in the TPMExtractor fork (see CHANGES.md): new entry point signature with Options;
-// bounds-checked section walk, named header fields and level loading for later decoders (see
-// the end of this file).
+// bounds-checked section walk, named header fields and level loading; level geometry export
+// (b3d_geom.h).
 
 #pragma once
 
@@ -23,7 +23,10 @@ namespace tpmx {
 //   - writes every B3D_TEX texture as <level_dump_root>/<NAME>/<i>.bmp (opts.bmp), coloured
 //     with its B3D_PALS palette (no colour key),
 //   - writes the decompressed image as <level_dump_root>/<NAME>/<NAME>.dec if
-//     opts.keep_decompressed.
+//     opts.keep_decompressed,
+//   - in default mode with opts.geometry Obj (the default), writes the level geometry as
+//     <level_dump_root>/<NAME>/<NAME>.obj and <NAME>.mtl, whose materials name the <i>.bmp
+//     textures (b3d_geom.h); a level whose geometry fails its checks gets none, and an error.
 // Default mode walks the section chain (offsets and sizes checked against the file), reads the
 // palettes and textures only from inside their sections, accepts an image that is not
 // compressed (such as a kept .dec), and warns about anything unusual. --legacy reads the level as
@@ -128,48 +131,12 @@ struct B3dImageInfo
 // still holds everything that could be decoded.
 bool b3d_load_image(const std::string& path, std::vector<uint8_t>& image, B3dImageInfo* info, std::string* err);
 
-// ------------------------------------------------------------------ level geometry (hook)
+// ------------------------------------------------------------------ level geometry
 //
-// process_b3d() writes the textures only; the level geometry is not decoded yet. A decoder goes
-// in a file of its own and starts from the calls process_b3d() makes in default mode:
-//
-//     std::vector<uint8_t> image;  B3dImageInfo info;  std::string err;
-//     if (!b3d_load_image(path, image, &info, &err)) ...;            // decompressed image
-//     const B3dWalk walk = b3d_walk_sections(image.data(), image.size());
-//     if (!walk.game_part_complete) ...;                              // broken chain
-//     const B3dSection* gmap = walk.find("B3D_GMAP");                 // bounds already checked
-//     BinReader r(image.data() + gmap->body(), (size_t)gmap->extent, path, gmap->body());
-//     const uint32_t grid_w = b3d_header_u32(image.data(), image.size(), kB3dHdrGridW);
-//
-// Its call belongs in b3d.cpp at the place marked "geometry hook", in default mode only and
-// behind a new option, so that the texture output and --legacy stay as they are.
-//
-// What a decoder reads (little-endian; every rule below holds on all retail levels):
-//   B3D_GMAP   grid_w x grid_h cells, row-major (cell = x + y * grid_w), 1 unit per cell, Z up.
-//              A cell is the byte 0xFF (empty) or a 16-byte block {u8 count; u8 flags; u8; u8;
-//              f32 z_min, z_max; 4 bytes 0} followed by count 64-byte entries; the stream ends
-//              exactly at the section end, with kB3dHdrGmapBlocks blocks and kB3dHdrGmapEntries
-//              entries. An entry is a polygon or, when its first u16 is 0xFFFF, a link
-//              {u16 0xFFFF; u8 n (1..5); u8 0; 5 x {i16 cell_x, cell_y; u32 unused; u32 id}}
-//              whose first n records name polygons stored in other cells that also cover this
-//              cell: the polygon in cell (cell_x, cell_y) whose render flags have 0x100 and
-//              whose link id equals id (the other records are zero).
-//              Polygon: +0x00 u16 v[4] (B3D_GVRT indices; v[3] = 0 for a triangle), +0x10 f32
-//              normal[3], +0x20 i16 front and +0x22 u16 back B3D_MAT index, +0x25 u8 vertex
-//              count (3 or 4), +0x26 u8 uv_mode, +0x2C u16 render flags (0x1 texture animation
-//              from the front to the back mapping, 0x2 two-sided, 0x100 link target), +0x30 u16
-//              link id. Vertices run clockwise seen from the side the normal points to (a JK
-//              surface runs counter-clockwise); in under 1% of polygons they run the other way,
-//              and the stored normal is the one the game uses. A few normals are NaN.
-//   B3D_GVRT   kB3dHdrNumVertices x {f32 x, y, z}.
-//   B3D_MAT    kB3dHdrNumMappings x 40 bytes {f32 uv[4][2]; i32 B3D_TEX index; u32 flags}: atlas
-//              corners in 0..1 (some tile beyond 1). uv_mode bits 0-2 choose one of the 8
-//              symmetries of the square for the corner order; on triangles (bit 7) bits 4-5
-//              choose which 3 of the 4 corners are used.
-//   B3D_TEX, B3D_PALS   the textures and palettes process_b3d() writes.
-//   B3D_AMAP   moving objects (doors, lifts): polygons whose byte +0x28 has 0x04 or 0x10 move
-//              with node +0x29 of object +0x2A.
-// The editor sections after B3D_END1 (B3D TMAP, B3D TLIB, B3D_TPLY) hold a tile-based copy of
-// the same polygons, usable as a cross-check; the game itself never reads them.
+// b3d_geom.h decodes the geometry sections (B3D_GMAP, B3D_GVRT, B3D_MAT, B3D_TEX, B3D_AMAP) from
+// the image b3d_load_image() returns, using b3d_walk_sections() for the game part of the chain,
+// and writes the OBJ/MTL files. The editor sections after B3D_END1 (B3D TMAP, B3D TLIB,
+// B3D_TPLY) hold a tile-based copy of the same polygons; the game never reads them, and neither
+// does the export.
 
 } // namespace tpmx

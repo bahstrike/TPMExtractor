@@ -3,12 +3,13 @@
 // Modified 2026 in the TPMExtractor fork (see CHANGES.md): portable I/O and BMP output through
 // the platform layer, Options, and errors with file and offset instead of crashes; the level is
 // decompressed in memory and parsed with bounds checks (default mode walks the section chain,
-// --legacy keeps the original's tag search and loop limit); section-walk API and a marked hook
-// for a geometry decoder.
+// --legacy keeps the original's tag search and loop limit); section-walk API; default mode also
+// exports the level geometry as OBJ/MTL (--geometry, b3d_geom.cpp).
 
 #include "b3d.h"
 
 #include "b3d_decompress.h"
+#include "b3d_geom.h"
 #include "binreader.h"
 #include "bmp.h"
 #include "image.h"
@@ -350,11 +351,13 @@ bool find_section_by_tag(const std::vector<uint8_t>& d, uint64_t from, const cha
     return true;
 }
 
+// header_ok: false when the image is not a level the tool reads at all (already reported).
 bool default_textures(const std::vector<uint8_t>& dec, const std::string& name, const std::string& dumpdir,
-                      const Options& opts, TextureCount& count, size_t& num_palettes)
+                      const Options& opts, TextureCount& count, size_t& num_palettes, bool& header_ok)
 {
     num_palettes = 0;
-    if (!check_header(dec, name))
+    header_ok = check_header(dec, name);
+    if (!header_ok)
         return false;
     const uint8_t* hdr = dec.data() + kB3dSectionHeaderSize;
     bool ok = true;
@@ -514,13 +517,23 @@ bool run_level(const std::string& szLevelFile, const std::string& szDumpDir, con
     const std::string name = info.was_compressed ? input + " (decompressed)" : input;
     TextureCount count;
     size_t num_palettes = 0;
-    if (!default_textures(image, name, files.dumpdir, opts, count, num_palettes))
+    bool header_ok = false;
+    if (!default_textures(image, name, files.dumpdir, opts, count, num_palettes, header_ok))
         ok = false;
     log::info("%s: %d texture(s), %zu palette(s)\n", input.c_str(), count.written, num_palettes);
 
-    // Geometry hook: a level geometry decoder (see the end of b3d.h) is called here, with `image`,
-    // `name` and files.dumpdir, behind an option of its own. Only default mode reaches this
-    // point, so --legacy output cannot change; the texture output above must not change either.
+    // Level geometry (b3d_geom.h): <NAME>.obj and <NAME>.mtl next to the textures. Only default
+    // mode reaches this point, so --legacy output cannot change, and the texture output above
+    // does not depend on it. An image that is not a level at all was reported above.
+    if (opts.geometry == GeometryMode::Obj && header_ok) {
+        if (info.truncated) {
+            log::error_at(name, image.size(), "level geometry not exported: the compressed data ends without its "
+                                              "end marker\n");
+            ok = false;
+        } else if (!b3d_export_geometry(image, name, files.dumpdir, levelname, opts)) {
+            ok = false;
+        }
+    }
     return ok;
 }
 

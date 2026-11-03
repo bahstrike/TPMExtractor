@@ -18,9 +18,9 @@
 __pycache__/
 *.pyc
 
-# Never commit anything extracted from game data (dumps, BAF/MAT/BMP/3DO/KEY/CMP files,
-# decompressed archives). Keep dumps outside the repository. The patterns below are a safety
-# net for the file types the tool reads and writes (any letter case).
+# Never commit anything extracted from game data (dumps, BAF/MAT/BMP/3DO/KEY/CMP files, level
+# OBJ/MTL files, decompressed archives). Keep dumps outside the repository. The patterns below
+# are a safety net for the file types the tool reads and writes (any letter case).
 *.[bB][aA][fF]
 *.[bB]3[dD]
 *.[dD][eE][cC]
@@ -38,6 +38,8 @@ __pycache__/
 *.[sS][pP][rR]
 [rR][eE][mM][aA][iI][nN].[hH][eE][xX]
 *.[gG][cC][fF]
+*.[oO][bB][jJ]
+*.[mM][tT][lL]
 # The dump's archive folders: game text from them uses extensions this repository also uses.
 [bB][iI][gG][lL][aA][bB]/
 [lL][oO][cC][aA][lL][iI][zZ][eE][lL][aA][bB]/

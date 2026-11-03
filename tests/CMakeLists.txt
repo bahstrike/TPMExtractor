@@ -56,14 +56,15 @@ endif()
 
 # ---------------------------------------------------------------------------------------------
 # Fuzz targets: each tests/fuzz_<name>.cpp defines LLVMFuzzerTestOneInput.
-#   in memory:   fuzz_lab (LAB directory), fuzz_b3d (level section walk, LZSS), fuzz_cmp (CMP)
+#   in memory:   fuzz_lab (LAB directory), fuzz_b3d (level section walk, LZSS), fuzz_b3d_geom
+#                (level geometry decoder and OBJ/MTL text), fuzz_cmp (CMP)
 #   file level:  fuzz_baf (process_baf: BAF parsers and every BAF writer, --legacy and default
-#                mode), fuzz_b3d_file (process_b3d), fuzz_lab_file (extract_lab), fuzz_z
-#                (extract_z). These run in a scratch folder of their own and abort when anything
-#                is written outside the output folder (tests/fuzz/sandbox.h). Set TPMX_FUZZ_TMP
-#                (or TMPDIR) to a RAM disk such as /dev/shm for speed. fuzz_baf builds a full CMP
-#                for every input with a colormap: tens of inputs per second under ASan, so give
-#                it several times the others' time.
+#                mode), fuzz_b3d_file (process_b3d, with the geometry files), fuzz_lab_file
+#                (extract_lab), fuzz_z (extract_z). These run in a scratch folder of their own and
+#                abort when anything is written outside the output folder (tests/fuzz/sandbox.h).
+#                Set TPMX_FUZZ_TMP (or TMPDIR) to a RAM disk such as /dev/shm for speed. fuzz_baf
+#                builds a full CMP for every input with a colormap: tens of inputs per second
+#                under ASan, so give it several times the others' time.
 # With clang they link with libFuzzer, and the top-level CMakeLists.txt (which defines TPMX_FUZZ
 # and TPMX_FUZZ_REPLAY) instruments every target for coverage (-fsanitize=fuzzer-no-link), so
 # libFuzzer is guided by the tool's own code; with other compilers (or TPMX_FUZZ_REPLAY=ON) they

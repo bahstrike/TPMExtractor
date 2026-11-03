@@ -15,6 +15,10 @@ default mode, and checks:
     retail 8-bit MATs (<base>8.mat, checked against the source texels), computed RADIUS values
     that cover the scaled model, the INSERT OFFSET option, and the options that switch outputs off;
   - the subcommands (z, lab, b3d, b3dall, baf, bafall) and --keep-decompressed;
+  - level geometry: the OBJ/MTL files default mode writes for every level fixture equal an
+    independent model's (make_fixtures.level_geometry_files), the SHAPES vector's data lines equal
+    the pinned hashes, the geometry options, and patched copies of SHAPES are refused, written
+    untextured or written with a warning, as the specification's mutation tests say;
   - the level decompressor (b3d_decompress_file, through the unit_b3d_decompress helper) against
     an independent decoder and, given one (--ref-b3d-decompress), a build of the original decoder;
   - damaged inputs are reported and skipped, never crash or hang; names from data never leave the
@@ -28,7 +32,8 @@ deleting them afterwards:
     "path TAB size TAB sha1", with the original's uninitialised "tail[i]=" lines masked as
     "tail[i]=<undefined>"; TPM_REF_UNDEFINED optionally lists the masked files);
   - a default-mode run over the whole disc: every retail CMP, 8-bit MAT and 3DO is checked as
-    above, and every file that default mode must not change is compared with the --legacy dump.
+    above, and every file that default mode must not change is compared with the --legacy dump;
+  - every level's OBJ/MTL against the independent geometry model, byte for byte.
   Only counts are printed; no file content is.
 
 Exit status: 0 all selected tests passed (some may be skipped), 77 every selected test was
@@ -1126,6 +1131,14 @@ def level_image_for_tool(info, fname):
     return mf.dec_of(image) if data != image else image
 
 
+def level_outputs_default(image, name, **geometry):
+    """{file: bytes} default mode writes into <dump>/<name>/ for a decompressed level image: the
+    textures (padded BMP rows) and the geometry (<name>.obj, <name>.mtl)."""
+    out = dict(mf.level_bmps(image, True))
+    out.update(mf.level_geometry_files(image, name, **geometry))
+    return out
+
+
 # ---------------------------------------------------------------------------- default-mode BAF rules
 
 
@@ -1446,7 +1459,7 @@ def t_disc_default(ctx):
     level_exp = {}
     for fname in info['levels']:
         name = fname.split('.')[0].upper()
-        for bn, b in mf.level_bmps(level_image_for_tool(info, fname), True):
+        for bn, b in level_outputs_default(level_image_for_tool(info, fname), name).items():
             level_exp['LEVEL/%s/%s' % (name, bn)] = b
     compare_files({k: v for k, v in tree.items() if k.startswith('LEVEL/')}, level_exp, 'default mode', pb)
     stems = {b.split('.')[0]: b for b, _ in baf_members(info)}
@@ -1736,7 +1749,7 @@ def t_b3d(ctx):
             shutil.rmtree(out, ignore_errors=True)
             r = ctx.tool('--no-pause', 'b3d', src, out)
             sound_run(r, pb, what='b3d %s/%s' % (sub, name))
-            compare_files(read_tree(out), {'%s/%s' % (stem, n): b for n, b in mf.level_bmps(img, True)},
+            compare_files(read_tree(out), {'%s/%s' % (stem, n): b for n, b in level_outputs_default(img, stem).items()},
                           'b3d %s/%s' % (sub, name), pb)
             # --legacy decompresses whatever the flag says, as the original did
             out = ctx.path('b3d_legacy_%s_%s' % (sub, stem))
@@ -1762,7 +1775,7 @@ def t_b3d(ctx):
     exp = {}
     for stem, img in (('BOX', mf.dec_of(mf.level_file('BOX.B3D', LEVEL_SPECS['BOX.B3D'])[1])),
                       ('FLAT', mf.level_file('FLAT.B3D', LEVEL_SPECS['FLAT.B3D'], False)[1])):
-        for n, b in mf.level_bmps(img, True):
+        for n, b in level_outputs_default(img, stem).items():
             exp['%s/%s' % (stem, n)] = b
     compare_files(read_tree(out), exp, 'b3dall', pb)
     # --keep-decompressed on a single level
@@ -1774,6 +1787,128 @@ def t_b3d(ctx):
     if pb.check(os.path.isfile(dec), 'b3d --keep-decompressed wrote no BOX.dec'):
         pb.check(open(dec, 'rb').read() == mf.dec_of(mf.level_file('BOX.B3D', LEVEL_SPECS['BOX.B3D'])[1]),
                  'BOX.dec differs from the decompressed image')
+    pb.done()
+
+
+# The summary line b3d_export_geometry prints for each level (stdout).
+GEOMETRY_SUMMARY = re.compile(r'(\d+) vertices, (\d+) faces \((\d+) triangles, (\d+) quads\); (\d+) moving in (\d+) '
+                              r'object\(s\), (\d+) hidden; (\d+) in their stored order, (\d+) untextured, (\d+) '
+                              r'textured otherwise under --geometry-texture-rule (game|mat); (\d+) unresolved LINK')
+
+
+@test('b3d.geometry')
+def t_geometry(ctx):
+    """The geometry vector SHAPES: pinned bytes, the OBJ/MTL default mode writes (pinned data-line
+    hashes and the independent model, compressed and not), the geometry options and --legacy."""
+    pb = Problems()
+    root = fresh_dir(ctx.path('geometry'))
+    dec, b3d = mf.shapes_image(), mf.shapes_file()
+    pb.check(hashlib.sha256(dec).hexdigest() == mf.SHAPES_DEC_SHA256, 'SHAPES.dec: the vector\'s bytes changed')
+    pb.check(hashlib.sha256(b3d).hexdigest() == mf.SHAPES_B3D_SHA256, 'SHAPES.B3D: the vector\'s bytes changed')
+    src = write(os.path.join(root, 'in', 'SHAPES.B3D'), b3d)
+    raw = write(os.path.join(root, 'in_raw', 'SHAPES.B3D'), dec)
+    bmps = dict(mf.level_bmps(dec, True))
+    for label, path in (('compressed', src), ('uncompressed', raw)):
+        out = os.path.join(root, 'out_' + label)
+        r = ctx.tool('--no-pause', 'b3d', path, out)
+        if sound_run(r, pb, what='b3d SHAPES (%s)' % label):
+            pb.check(not r.warnings(), 'b3d SHAPES (%s): warnings %s' % (label, r.warnings()[:3]))
+        got = sub_tree(read_tree(out), 'SHAPES')
+        compare_files(got, level_outputs_default(dec, 'SHAPES'), 'b3d SHAPES (%s)' % label, pb)
+        for f, want in (('SHAPES.obj', mf.SHAPES_OBJ_DATA_SHA256), ('SHAPES.mtl', mf.SHAPES_MTL_DATA_SHA256)):
+            data = got.get(f, b'')
+            pb.check(mf.data_line_sha256(data) == want, '%s (%s): data lines differ from the pinned vector' % (f, label))
+            pb.check(data.count(b'\n') == data.count(b'\r\n') > 0, '%s (%s): lines do not end in CRLF' % (f, label))
+        m = GEOMETRY_SUMMARY.search(r.out.decode('latin-1'))
+        if pb.check(m, 'b3d SHAPES (%s): no geometry summary on stdout' % label):
+            # 50 vertices, 14 faces (4 triangles), 1 moving, 1 hidden, 1 kept, 0 untextured, 1 rule difference
+            pb.check(m.groups() == ('50', '14', '4', '10', '1', '1', '1', '1', '0', '1', 'mat', '0'),
+                     'b3d SHAPES (%s): summary %r' % (label, m.groups()))
+    # options: each run is compared with the model under the same settings
+    for tag, opts, files in (
+            ('scale1', ['--scale', '1'], level_outputs_default(dec, 'SHAPES', scale=1.0)),
+            ('scale_inexact', ['--scale', '0.0254'], level_outputs_default(dec, 'SHAPES', scale=0.0254)),
+            ('rule_mat', ['--geometry-texture-rule', 'mat'], level_outputs_default(dec, 'SHAPES', rule='mat')),
+            ('rule_game', ['--geometry-texture-rule', 'game'], level_outputs_default(dec, 'SHAPES')),
+            ('obj', ['--geometry', 'obj'], level_outputs_default(dec, 'SHAPES')),
+            ('none', ['--geometry', 'none'], bmps),
+            ('no_bmp', ['--no-bmp'], mf.level_geometry_files(dec, 'SHAPES'))):   # the MTL still names <i>.bmp
+        out = os.path.join(root, 'out_' + tag)
+        r = ctx.tool(*(['--no-pause'] + opts + ['b3d', src, out]))
+        sound_run(r, pb, what='b3d %s' % ' '.join(opts))
+        compare_files(sub_tree(read_tree(out), 'SHAPES'), files, 'b3d %s' % ' '.join(opts), pb)
+    # the mat rule textures polygon 10 (output face 11) with its mapping's page 1 instead of page 2,
+    # which joins it to the page-1 run of face 10
+    obj_mat = mf.level_geometry_files(dec, 'SHAPES', rule='mat')['SHAPES.obj']
+    pb.check(b'\r\nusemtl tex1\r\nf 32/34/10 35/35/10 34/36/10 33/37/10\r\nf 36/38/11 ' in obj_mat,
+             'model: the mat rule does not texture face 11 with page 1')
+    # --legacy writes the textures only, as the original did
+    out = os.path.join(root, 'out_legacy')
+    r = ctx.tool('--legacy', '--no-pause', 'b3d', src, out)
+    sound_run(r, pb, what='--legacy b3d SHAPES')
+    compare_files(sub_tree(read_tree(out), 'SHAPES'), dict(mf.legacy_b3d_outputs(dec)), '--legacy b3d SHAPES', pb)
+    # usage errors: --legacy refuses the geometry options; bad values
+    for argv in (['--legacy', '--geometry', 'obj'], ['--legacy', '--geometry', 'none'],
+                 ['--legacy', '--geometry-texture-rule', 'game'], ['--geometry', 'ply'],
+                 ['--geometry-texture-rule', 'texture'], ['--geometry']):
+        out = os.path.join(root, 'out_usage')
+        r = ctx.tool(*(argv + ['--no-pause', 'b3d', src, out]))
+        sound_run(r, pb, allowed_rc=(2,), allow_errors=True, what=' '.join(argv))
+        pb.check(not os.path.exists(out), '%s: wrote output' % ' '.join(argv))
+    # b3dall: the vector next to a level fixture, in a folder of mixed case
+    mixed = fresh_dir(os.path.join(root, 'b3dall_in'))
+    write(os.path.join(mixed, 'Shapes.b3d'), b3d)
+    write(os.path.join(mixed, 'box.B3D'), mf.level_file('BOX.B3D', LEVEL_SPECS['BOX.B3D'], True)[0])
+    out = os.path.join(root, 'b3dall_out')
+    r = ctx.tool('--no-pause', 'b3dall', mixed, out)
+    sound_run(r, pb, what='b3dall with SHAPES')
+    exp = {}
+    for stem, img in (('SHAPES', dec), ('BOX', mf.dec_of(mf.level_file('BOX.B3D', LEVEL_SPECS['BOX.B3D'])[1]))):
+        exp.update({'%s/%s' % (stem, n): b for n, b in level_outputs_default(img, stem).items()})
+    compare_files(read_tree(out), exp, 'b3dall with SHAPES', pb)
+    pb.done()
+
+
+@test('b3d.geometry_mutations')
+def t_geometry_mutations(ctx):
+    """Patched copies of SHAPES (make_fixtures.SHAPES_MUTATIONS): a refused geometry is an error
+    naming the offending offset, with no OBJ/MTL; an out-of-range mapping or texture makes a face
+    untextured; a LINK record without target and an older header version are warnings."""
+    pb = Problems()
+    root = fresh_dir(ctx.path('geometry_mutations'))
+    for mid, patch, outcome, detail in mf.SHAPES_MUTATIONS:
+        name = 'SHAPES_' + mid.upper()
+        data = mf.shapes_mutant(patch)
+        src = write(os.path.join(root, 'in', name + '.B3D'), data)
+        out = os.path.join(root, 'out_' + mid)
+        r = ctx.tool('--no-pause', 'b3d', src, out)
+        tree = sub_tree(read_tree(out), name) if os.path.isdir(out) else {}
+        geo = {k: v for k, v in tree.items() if k.endswith(('.obj', '.mtl'))}
+        label = 'mutation %s' % mid
+        if outcome == 'error':
+            if not sound_run(r, pb, allowed_rc=(1,), allow_errors=True, what=label):
+                continue
+            pb.check(any('@0x%X:' % detail in l for l in r.errors()),
+                     '%s: no error names offset 0x%X: %s' % (label, detail, r.errors()[:3]))
+            pb.check(not geo, '%s: geometry written although refused: %s' % (label, sorted(geo)))
+            try:
+                mf.decode_geometry(data)
+                pb.add('%s: the model accepts the geometry' % label)
+            except mf.GeometryError as e:
+                pb.check(e.offset == detail, '%s: the model refuses it at 0x%X' % (label, e.offset))
+            continue
+        if not sound_run(r, pb, what=label):
+            continue
+        pb.check(r.warnings(), '%s: no warning' % label)
+        compare_files(geo, mf.level_geometry_files(data, name), label, pb)
+        if outcome == 'face':
+            want = '%d polygon(s) exported with the material "untextured"' % len(detail)
+            pb.check(any(want in l for l in r.warnings()), '%s: no warning says %r: %s' % (label, want, r.warnings()))
+        if mid == 'm02':
+            # the specification's statement of this case
+            obj, mtl = geo.get(name + '.obj', b''), geo.get(name + '.mtl', b'')
+            pb.check(b'\r\nusemtl untextured\r\nf 1//1 4//1 3//1 2//1\r\n' in obj and obj.count(b'\r\nvt ') == 48
+                     and b'\r\nnewmtl untextured\r\n' in mtl, '%s: polygon 0 is not written untextured' % label)
     pb.done()
 
 
@@ -2308,6 +2443,97 @@ def t_real_compare(ctx):
           'by several BAFs' % (same, sum(1 for v in steps.values() if v != 100), palette_appended,
                                sum(changed_kinds.values()), changed_kinds,
                                sum(1 for m in shared.values() if len(m) > 1)))
+    pb.done(summary=True)
+
+
+def find_dir_ci(root, *parts):
+    """root/parts..., each component matched ignoring case, or None."""
+    path = root
+    for part in parts:
+        names = [n for n in os.listdir(path) if n.lower() == part.lower() and os.path.isdir(os.path.join(path, n))]
+        if not names:
+            return None
+        path = os.path.join(path, sorted(names)[0])
+    return path
+
+
+def line_difference(a, b):
+    """Where two text files first differ, as a line number and the lines' keywords only (the lines
+    themselves are data derived from the disc and are never printed)."""
+    la, lb = a.split(b'\r\n'), b.split(b'\r\n')
+    for i, (x, y) in enumerate(zip(la, lb)):
+        if x != y:
+            return 'line %d (%s / %s)' % (i + 1, x.split(b' ')[0].decode('latin-1')[:8],
+                                          y.split(b' ')[0].decode('latin-1')[:8])
+    return 'line count %d/%d' % (len(la), len(lb))
+
+
+@test('real.level_geometry', suite='real')
+def t_real_geometry(ctx):
+    """Every level on the disc: b3dall --keep-decompressed, then the OBJ/MTL compared with the
+    independent model run on the kept image, byte for byte; no warnings, no untextured faces,
+    every LINK record resolved; the disc run (default mode) writes the same OBJ/MTL."""
+    disc_root = real_root(ctx)
+    pb = Problems()
+    level_dir = find_dir_ci(disc_root, 'GAMEDATA', 'LEVEL')
+    if not level_dir:
+        raise Fail('TPM_DISC has no GAMEDATA/LEVEL folder')
+    out = os.path.join(real_work(ctx), 'geometry')
+    r = ctx.tool('--no-pause', '--keep-decompressed', 'b3dall', level_dir, out, timeout=ctx.timeout * 10, real=True)
+    run_pb = Problems()
+    sound_run(r, run_pb, what='b3dall --keep-decompressed on the disc\'s levels')
+    pb.raw += run_pb.items
+    pb.check(not r.warnings(), '%d warning(s) from b3dall' % len(r.warnings()))
+    t = {'levels': 0, 'vertices': 0, 'faces': 0, 'triangles': 0, 'kept': 0, 'differs': 0, 'moving': 0, 'hidden': 0,
+         'records': 0}
+    names = sorted(d for d in os.listdir(out) if os.path.isdir(os.path.join(out, d))) if os.path.isdir(out) else []
+    for name in names:
+        d = os.path.join(out, name)
+        paths = {ext: os.path.join(d, name + ext) for ext in ('.dec', '.obj', '.mtl')}
+        if not all(pb.check(os.path.isfile(p), '%s: no %s%s' % (name, name, ext)) for ext, p in paths.items()):
+            continue
+        with open(paths['.dec'], 'rb') as f:
+            image = f.read()
+        try:
+            g = mf.decode_geometry(image)
+        except mf.GeometryError as e:
+            pb.add('%s: the model refuses the geometry at 0x%X' % (name, e.offset))
+            continue
+        obj, mtl, st = mf.geometry_text(g, name)
+        for ext, text in (('.obj', obj), ('.mtl', mtl)):
+            with open(paths[ext], 'rb') as f:
+                got = f.read()
+            want = mf.crlf(text)
+            pb.check(got == want, '%s: %s%s differs from the model at %s' % (name, name, ext, line_difference(got, want)))
+        records, unresolved, shared = mf.check_links(g)
+        pb.check(not st['untextured'], '%s: %d untextured face(s)' % (name, len(st['untextured'])))
+        pb.check(unresolved == 0 and shared == 0, '%s: %d unresolved LINK record(s), %d shared link id(s)'
+                 % (name, unresolved, shared))
+        pb.check(st['faces'] == len(g['polys']) > 0, '%s: %d faces for %d polygons' % (name, st['faces'], len(g['polys'])))
+        missing = [i for i in range(len(g['textures'])) if not os.path.isfile(os.path.join(d, '%d.bmp' % i))]
+        pb.check(not missing, '%s: the MTL names %d texture(s) that were not written' % (name, len(missing)))
+        os.remove(paths['.dec'])
+        t['levels'] += 1
+        t['vertices'] += len(g['vertices'])
+        t['faces'] += st['faces']
+        t['triangles'] += st['triangles']
+        t['kept'] += st['kept']
+        t['differs'] += st['rule_differs']
+        t['moving'] += sum(v for k, v in st['categories'].items() if k.startswith('amap'))
+        t['hidden'] += st['categories'].get('hidden', 0)
+        t['records'] += records
+    pb.check(t['levels'] > 0, 'no level geometry written')
+    # the disc run writes the same files
+    dout, dr = real_dump(ctx, 'default')
+    for name in names:
+        for ext in ('.obj', '.mtl'):
+            a, b = os.path.join(dout, 'LEVEL', name, name + ext), os.path.join(out, name, name + ext)
+            same = os.path.isfile(a) and os.path.isfile(b) and open(a, 'rb').read() == open(b, 'rb').read()
+            pb.check(same, 'LEVEL/%s/%s%s: the disc run differs from b3dall' % (name, name, ext))
+    print('    %d levels: OBJ/MTL identical to the independent model and to the disc run; %d vertices, %d faces '
+          '(%d triangles), %d in their stored order, %d textured otherwise under the mat rule, %d moving, %d hidden, '
+          '%d LINK records resolved, 0 untextured' % (t['levels'], t['vertices'], t['faces'], t['triangles'],
+                                                      t['kept'], t['differs'], t['moving'], t['hidden'], t['records']))
     pb.done(summary=True)
 
 

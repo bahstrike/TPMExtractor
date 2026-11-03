@@ -31,6 +31,9 @@
     <ClCompile Include="b3d_decompress.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="b3d_geom.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="baf.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -82,6 +85,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="b3d_decompress.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="b3d_geom.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="baf.h">

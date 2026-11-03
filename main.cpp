@@ -4,7 +4,7 @@
 // platform layer does directories, globbing and the key press), command-line options and
 // --legacy, the commands all/z/lab/b3d/b3dall/baf/bafall, a case-insensitive level scan, errors
 // that skip one file instead of ending the run, exit codes, and no key press at the end unless
-// --pause is given.
+// --pause is given; level geometry (OBJ/MTL) in the level commands' help.
 //
 // "tpmextractor DiscDir DumpDir" (the command "all") does what the original main() did, in the
 // same order and with the same output names: BIG.Z -> big.lab -> biglab/, LOCALIZE.LAB ->
@@ -81,7 +81,8 @@ const char kCommandHelp[] =
     "                           DumpDir/biglab/*.baf -> DumpDir/BAF/<name>/\n"
     "  z FILE.Z OUTDIR        every file of an InstallShield v3 archive (BIG.Z holds big.lab)\n"
     "  lab FILE.LAB OUTDIR    every file of a LAB archive (big.lab, LOCALIZE.LAB, VOICE.LAB)\n"
-    "  b3d FILE.B3D OUTDIR    one level's textures -> OUTDIR/<NAME>/<i>.bmp\n"
+    "  b3d FILE.B3D OUTDIR    one level -> OUTDIR/<NAME>/: its textures <i>.bmp and (default\n"
+    "                         mode) its geometry <NAME>.obj with <NAME>.mtl\n"
     "  b3dall DIR OUTDIR      every *.B3D file in DIR -> OUTDIR/<NAME>/\n"
     "  baf FILE.BAF OUTDIR    one actor -> OUTDIR/<name>/ (colormap, MATs, BMPs, 3DO, KEYs)\n"
     "  bafall DIR OUTDIR      every *.BAF file in DIR -> OUTDIR/<name>/\n"

@@ -53,6 +53,8 @@ void apply_legacy(Options& o)
     o.bmp = true;
     o.palette.clear();
     o.debug_dumps = true;
+    o.geometry = GeometryMode::None;
+    o.geometry_texture_rule = GeometryTextureRule::Game;
     o.keep_decompressed = false;
 }
 
@@ -256,6 +258,30 @@ bool parse_args(int argc, const char* const* argv, ParsedArgs& out, std::string&
             }
             o.palette = value;
             output_options.push_back(name);
+        } else if (name == "--geometry") {
+            if (!take_value())
+                return false;
+            if (value == "obj") {
+                o.geometry = GeometryMode::Obj;
+            } else if (value == "none") {
+                o.geometry = GeometryMode::None;
+            } else {
+                err = "--geometry must be obj or none, got \"" + value + "\"";
+                return false;
+            }
+            output_options.push_back(name);
+        } else if (name == "--geometry-texture-rule") {
+            if (!take_value())
+                return false;
+            if (value == "game") {
+                o.geometry_texture_rule = GeometryTextureRule::Game;
+            } else if (value == "mat") {
+                o.geometry_texture_rule = GeometryTextureRule::Mat;
+            } else {
+                err = "--geometry-texture-rule must be game or mat, got \"" + value + "\"";
+                return false;
+            }
+            output_options.push_back(name);
         } else {
             err = "unknown option " + arg;
             return false;
@@ -287,7 +313,7 @@ std::string usage_text(const char* program_name)
            "\n"
            "Options:\n"
            "  --legacy               reproduce the original TPMExtractor output byte for byte\n"
-           "  --scale F              scale for 3DO/KEY positions (default 0.2)\n"
+           "  --scale F              scale for 3DO/KEY and level OBJ positions (default 0.2)\n"
            "  --[no-]draw-scale      also multiply positions by the BAF's own draw scale\n"
            "                         (header +0xAC), as the game does (default on); a 3DO or\n"
            "                         KEY drawn at a scale other than 1 is named *_s<hundredths>\n"
@@ -308,6 +334,11 @@ std::string usage_text(const char* program_name)
            "  --palette FILE         target palette (.cmp or 768-byte .pal) for the 8-bit MATs\n"
            "                         and for BAFs that have no colormap\n"
            "  --[no-]debug-dumps     *.3do.txt, *.key.txt and REMAIN.HEX (default on)\n"
+           "  --geometry M           obj (default: each level's geometry as <NAME>.obj and\n"
+           "                         <NAME>.mtl next to its textures) or none\n"
+           "  --geometry-texture-rule R\n"
+           "                         game (default: the texture the game draws each polygon\n"
+           "                         with) or mat (always its mapping's texture)\n"
            "  --keep-decompressed    keep big.lab and LEVEL/<name>/<name>.dec\n"
            "  --[no-]pause           wait for a key before exiting (default off; the original\n"
            "                         always waited)\n"
@@ -343,6 +374,8 @@ std::string describe(const Options& o)
            " mat8=" + (o.mat8 ? "on" : "off") + " mat16=" + (o.mat16 ? "on" : "off") + " bmp=" + (o.bmp ? "on" : "off") +
            " palette=" + (o.palette.empty() ? std::string("auto") : o.palette) +
            " debug-dumps=" + (o.debug_dumps ? "on" : "off") +
+           " geometry=" + (o.geometry == GeometryMode::Obj ? "obj" : "none") +
+           " geometry-texture-rule=" + (o.geometry_texture_rule == GeometryTextureRule::Game ? "game" : "mat") +
            " keep-decompressed=" + (o.keep_decompressed ? "on" : "off");
 }
 

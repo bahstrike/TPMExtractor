@@ -22,6 +22,11 @@ Formats written (all little-endian):
           entries, and the samples of them are written there, with their LAB type codes.
   .Z      InstallShield v3 archives with stored and PKWARE DCL "implode" members.
 
+  SHAPES  the level-geometry test vector: 14 abstract polygons on a 5 x 3 grid covering every UV
+          symmetry, the texture rules, LINK entries, moving and hidden polygons, a two-sided,
+          a translucent and an animated polygon, one stored counter-clockwise and one with a
+          NaN normal (shapes_image, shapes_file), and patched copies of it (SHAPES_MUTATIONS).
+
   damaged inputs: copies of the fixtures cut at structure boundaries or with one count, size or
           offset field overwritten (baf_mutants, lab_mutants, level_mutants, z_mutants), and
           files whose entry names try to leave the output folder (unsafe_name_*).
@@ -30,6 +35,8 @@ Besides the writers, the module holds independent models that the test runner co
 against:
   legacy_baf_outputs()   the original tool's BAF read order and output, file by file;
   legacy_b3d_outputs()   the original tool's level texture dump from a decompressed image;
+  decode_geometry(), geometry_text(), level_geometry_files()
+                         the level geometry decoder and the OBJ/MTL files of default mode;
   lab_outputs()          LAB extraction from the stored offsets and from the sequential read;
   is3_outputs()          the files a .Z archive holds;
   lzss_decode(), dcl_explode(), walk_sections(): reference readers used by --self-test and by
@@ -42,6 +49,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import math
 import os
 import struct
@@ -1885,6 +1893,627 @@ def level_file(name, spec, compressed=True):
     return (compress_level(image) if compressed else image), image
 
 
+# ============================================================================ B3D level geometry
+#
+# The SHAPES vector: a level whose geometry covers the decoder's cases with abstract shapes,
+# generated palettes and generated pixels. Its bytes are pinned by SHAPES_DEC_SHA256 and
+# SHAPES_B3D_SHA256, and the OBJ/MTL default mode writes for it (scale 0.2) by the hashes of
+# their data lines (comment and blank lines dropped, '\n' line ends). Polygons in GMAP order:
+#   #0  floor quad: stored clockwise, so reversed; shares 2 welded vertices with #6
+#   #1  floor quad on a texel-centre sub-rectangle, UV symmetry 5
+#   #2  vertical triangle, normal -Y; triangle corner subset 2; UVs tiling to u = 2
+#   #3  two-sided wall quad, normal +X, mirrored back mapping
+#   #4  zero-area triangle whose stored normal is (-inf, NaN, NaN): facing class 6 gives (0,0,-1)
+#   #5  triangle flagged as moving with object 5, which does not exist: static
+#   #6  floor quad stored counter-clockwise: kept in its order
+#   #7  translucent floor quad (blend 16): textured with its mapping's page
+#   #8  floor quad with a texture animation over mappings 4..5
+#   #9  quad spanning cells (0,2)-(1,2): LINK target id 1, LINK entry in cell (1,2)
+#   #10 opaque quad whose own texture index (2) differs from its mapping's page (1)
+#   #11 blend 31 decal quad with mapping flag bit 2
+#   #12 quad moving with object 0 node 0 (category amap0)
+#   #13 hidden triangle (category hidden)
+
+SHAPES_GRID = (5, 3)
+SHAPES_PALETTES = [
+    [(i, (3 * i) & 0xFF, 255 - i) for i in range(256)],
+    [(255 - i, i, (5 * i) & 0xFF) for i in range(256)],
+]
+# B3D_TEX: (width, height, palette, pixel(x, y))
+SHAPES_TEXTURES = [
+    (8, 8, 0, lambda x, y: (y * 8 + x) * 4),
+    (8, 4, 1, lambda x, y: (x * 32 + y * 8) & 0xFF),
+    (4, 4, 0, lambda x, y: 255 - (y * 4 + x) * 16),
+]
+# B3D_MAT: (corner uvs (u, v) x 4, texture page, flags)
+SHAPES_MAPPINGS = [
+    (((0, 0), (1, 0), (1, 1), (0, 1)), 0, 0),                                          # M0 the whole page 0
+    (((0.0625, 0.5625), (0.4375, 0.5625), (0.4375, 0.9375), (0.0625, 0.9375)), 0, 0),  # M1 texel centres
+    (((0, 0), (2, 0), (2, 1), (0, 1)), 1, 0),                                          # M2 tiles twice in u
+    (((0.5, 0), (1, 0), (1, 1), (0.5, 1)), 1, 0),                                      # M3 right half of page 1
+    (((0, 0), (0.5, 0), (0.5, 0.5), (0, 0.5)), 2, 0),                                  # M4 animation frame 0
+    (((0.5, 0.5), (1, 0.5), (1, 1), (0.5, 1)), 2, 0),                                  # M5 animation frame 1
+    (((0, 0), (1, 0), (1, 1), (0, 1)), 1, 0),                                          # M6 the whole page 1
+    (((0.5, 0), (1, 0), (1, 0.5), (0.5, 0.5)), 0, 4),                                  # M7 flag bit 2
+    (((0, 0), (1, 0), (1, 1), (0, 1)), 2, 8),                                          # M8 flag bit 3, unused
+    (((1, 0), (0, 0), (0, 1), (1, 1)), 0, 0),                                          # M9 mirrored (back side)
+]
+# B3D_GVRT: 50 vertices; 28 and 38 are the same position on purpose
+SHAPES_VERTICES = [
+    (0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0),
+    (1, 0, 0.5), (1, 1, 0.5), (2, 1, 0.5), (2, 0, 0.5),
+    (1.25, 0.25, 0.5), (1.5, 0.25, 1.5), (1.75, 0.25, 0.5),
+    (2.5, 0, 0), (2.5, 0, 1), (2.5, 1, 1), (2.5, 1, 0),
+    (3.25, 0.5, 0), (3.5, 0.5, 0), (3.75, 0.5, 0),
+    (3.25, 0.75, 0.25), (3.75, 0.75, 0.25), (3.5, 0.25, 0.25),
+    (1, 2, 0), (0, 2, 0),
+    (2, 1, 0.25), (2, 2, 0.25), (3, 2, 0.25), (3, 1, 0.25),
+    (3, 1, 0), (3, 2, 0), (4, 2, 0), (4, 1, 0),
+    (0.5, 2.25, 1), (0.5, 2.75, 1), (1.5, 2.75, 1), (1.5, 2.25, 1),
+    (2, 2, 0), (2, 3, 0), (3, 3, 0), (3, 2, 0),
+    (2.25, 2.25, 0.25), (2.25, 2.75, 0.25), (2.75, 2.75, 0.25), (2.75, 2.25, 0.25),
+    (3, 2.5, 0), (3, 2.5, 1), (4, 2.5, 1), (4, 2.5, 0),
+    (3.25, 2.75, 0), (3.5, 2.75, 0.5), (3.75, 2.75, 0),
+]
+# Polygons in GMAP order. Fields not given are 0, except tile_sx = tile_sy = 1.
+#   cell, v, n (normal), mf/mb (front/back mapping), tb (own texture), uvm (uv_mode), facing, extras
+SHAPES_POLYS = [
+    dict(cell=(0, 0), v=(0, 1, 2, 3), n=(0, 0, 1), mf=0, mb=0, tb=0, uvm=0x00, facing=5),
+    dict(cell=(1, 0), v=(4, 5, 6, 7), n=(0, 0, 1), mf=1, mb=1, tb=0, uvm=0x05, facing=5),
+    dict(cell=(1, 0), v=(8, 9, 10), n=(0, -1, 0), mf=2, mb=2, tb=1, uvm=0xA3, facing=4, coll=0x0001, tile_h=2),
+    dict(cell=(2, 0), v=(11, 12, 13, 14), n=(1, 0, 0), mf=0, mb=9, tb=0, uvm=0x01, facing=1, render=0x0002,
+         coll=0x0001),
+    dict(cell=(3, 0), v=(15, 16, 17), n='nan', mf=0, mb=0, tb=0, uvm=0x81, facing=6, coll=0x8000),
+    dict(cell=(3, 0), v=(18, 19, 20), n=(0, 0, 1), mf=1, mb=1, tb=0, uvm=0x96, facing=5, obj=0x04, node=0,
+         obj_index=5),
+    dict(cell=(0, 1), v=(1, 2, 21, 22), n=(0, 0, 1), mf=0, mb=0, tb=0, uvm=0x03, facing=5),
+    dict(cell=(2, 1), v=(23, 24, 25, 26), n=(0, 0, 1), mf=3, mb=3, tb=1, uvm=0x02, facing=5, blend=16,
+         coll=0x0008, surf=0xE000),
+    dict(cell=(3, 1), v=(27, 28, 29, 30), n=(0, 0, 1), mf=4, mb=5, tb=2, uvm=0x00, facing=5, render=0x0001,
+         speed=500),
+    dict(cell=(0, 2), v=(31, 32, 33, 34), n=(0, 0, 1), mf=2, mb=2, tb=1, uvm=0x04, facing=5, render=0x0100,
+         link_id=1, tile_sx=2, z_floor=1),
+    dict(cell=(2, 2), v=(35, 36, 37, 38), n=(0, 0, 1), mf=6, mb=6, tb=2, uvm=0x06, facing=5),
+    dict(cell=(2, 2), v=(39, 40, 41, 42), n=(0, 0, 1), mf=7, mb=7, tb=0, uvm=0x07, facing=5, blend=31,
+         coll=0x8000),
+    dict(cell=(3, 2), v=(43, 44, 45, 46), n=(0, -1, 0), mf=0, mb=0, tb=0, uvm=0x00, facing=4, obj=0x04, node=0,
+         obj_index=0, coll=0x0001),
+    dict(cell=(3, 2), v=(47, 48, 49), n=(0, -1, 0), mf=1, mb=1, tb=0, uvm=0xB5, facing=4, obj=0x10, node=0,
+         obj_index=0, coll=0x0001),
+]
+SHAPES_LINKS = {(1, 2): [(0, 2, 1)]}                       # cell -> [(cell_x, cell_y, link id)]
+SHAPES_BLOCK_FLAGS = {(3, 0): 0x02, (0, 2): 0x04, (1, 2): 0x08, (3, 2): 0x02}
+
+SHAPES_DEC_SHA256 = 'dcc5ccf43885fee2841f429495c48500e5cec46473672852c2eb390680a9ed1a'
+SHAPES_B3D_SHA256 = '428a1d05f0e2aed75aad491bffcc45057d90d8b85ea693aaf5ab32e0da9fc3a6'
+SHAPES_OBJ_DATA_SHA256 = 'a5c849e5e40358fd694572c792f051e6ba280e669994fe6e35501f08eb7ed9f6'
+SHAPES_MTL_DATA_SHA256 = 'cae0963fcceb0235673fd2009bb5e2ffb36e062e9f2b3e7e712a09c4ce62ec49'
+
+
+def _shapes_poly_entry(p):
+    e = bytearray(64)
+    v = list(p['v']) + [0] * (4 - len(p['v']))
+    struct.pack_into('<4H', e, 0x00, *v)
+    if p['n'] == 'nan':
+        struct.pack_into('<3I', e, 0x10, 0xFF800000, 0xFFC00000, 0xFFC00000)   # -inf, NaN, NaN
+    else:
+        struct.pack_into('<3f', e, 0x10, *p['n'])
+    zs = [SHAPES_VERTICES[i][2] for i in p['v']]
+    z_floor = p.get('z_floor', math.floor(min(zs)))
+    e[0x1C] = z_floor
+    struct.pack_into('<hH', e, 0x20, p['mf'], p['mb'])
+    e[0x24] = p['tb']
+    e[0x25] = len(p['v'])
+    e[0x26] = p['uvm']
+    e[0x27] = p['facing']
+    e[0x28] = p.get('obj', 0)
+    e[0x29] = p.get('node', 0)
+    e[0x2A] = p.get('obj_index', 0)
+    e[0x2B] = p.get('blend', 0)
+    struct.pack_into('<H', e, 0x2C, p.get('render', 0))
+    struct.pack_into('<H', e, 0x30, p.get('link_id', 0))
+    struct.pack_into('<h', e, 0x32, p.get('speed', 0))
+    e[0x39] = p.get('tile_sx', 1)
+    e[0x3A] = p.get('tile_sy', 1)
+    e[0x3B] = p.get('tile_h', max(1, math.ceil(max(zs) - z_floor)))
+    struct.pack_into('<HH', e, 0x3C, p.get('coll', 0), p.get('surf', 0))
+    return bytes(e)
+
+
+def _shapes_link_entry(records):
+    e = bytearray(64)
+    struct.pack_into('<HBB', e, 0, 0xFFFF, len(records), 0)
+    for k, (cx, cy, lid) in enumerate(records):
+        struct.pack_into('<hhII', e, 4 + 12 * k, cx, cy, 0, lid)
+    return bytes(e)
+
+
+def _shapes_gmap():
+    out = bytearray()
+    blocks = entries = 0
+    for cy in range(SHAPES_GRID[1]):
+        for cx in range(SHAPES_GRID[0]):
+            polys = [p for p in SHAPES_POLYS if p['cell'] == (cx, cy)]
+            links = SHAPES_LINKS.get((cx, cy), [])
+            count = len(polys) + (1 if links else 0)
+            if count == 0:
+                out.append(0xFF)
+                continue
+            z_min = 0.0 if links else float(min(_shapes_poly_entry(p)[0x1C] for p in polys))
+            if polys:
+                z_max = float(max(_shapes_poly_entry(p)[0x1C] + _shapes_poly_entry(p)[0x3B] for p in polys))
+            else:
+                z_max = 2.0                    # a LINK-only block: the target's z_floor + tile_h
+            out += struct.pack('<BBBBffI', count, SHAPES_BLOCK_FLAGS.get((cx, cy), 0), 0, 0, z_min, z_max, 0)
+            for p in polys:
+                out += _shapes_poly_entry(p)
+            if links:
+                out += _shapes_link_entry(links)
+            blocks += 1
+            entries += count
+    return bytes(out), blocks, entries
+
+
+def _shapes_amap():
+    """One moving object (type 0, active) with one node: pivot (3.5, 2.5, 0), 2 polygons."""
+    rec = bytearray(0x84 + 156 + 4 * 2)
+    struct.pack_into('<II', rec, 0x00, 1, 0)
+    struct.pack_into('<I', rec, 0x18, 0)
+    struct.pack_into('<I', rec, 0x24, 1)
+    node = 0x84
+    pivot = (3.5, 2.5, 0.0)
+    struct.pack_into('<3f', rec, node + 0x08, *pivot)
+    struct.pack_into('<12f', rec, node + 0x14, 1, 0, 0, 0, 1, 0, 0, 0, 1, *pivot)
+    struct.pack_into('<I', rec, node + 0x4C, 2)
+    struct.pack_into('<i', rec, node + 0x54, -1)
+    struct.pack_into('<12f', rec, node + 0x64, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+    return struct.pack('<I', len(rec)) + bytes(rec)
+
+
+def shapes_image(compressed_flag=0):
+    """The SHAPES level image: FILE, PALS, GMAP, GVRT, LVRT, MAT, TEX, AMAP, END1, and nothing
+    after B3D_END1 (a level may end there; the game reads no further)."""
+    gmap, blocks, entries = _shapes_gmap()
+    H = bytearray(2200)
+
+    def put(off, fmt, *v):
+        struct.pack_into('<' + fmt, H, off, *v)
+
+    put(0x000, 'I', B3D_VERSION)
+    put(0x008, '3f', 0.5, 0.5, 0.0)          # start position, on polygon 0
+    put(0x020, 'I', len(SHAPES_PALETTES))
+    put(0x028, 'II', *SHAPES_GRID)
+    put(0x030, 'ii', 0, 2)                   # z range: ceil(max vertex z)
+    put(0x038, 'IIII', blocks, 80, entries, 64)
+    put(0x048, 'IIII', len(SHAPES_VERTICES), 12, 1, 12)
+    put(0x058, 'III', len(SHAPES_MAPPINGS), 40, len(SHAPES_TEXTURES))
+    put(0x068, 'IIII', 0, 72, 0, 72)         # no lights
+    put(0x0B0, 'IIII', 0, 4, 1, 4)           # no ADEF; one moving object, AMAP version 4
+    put(0x0C0, 'i', 2)                       # next link id: LINK targets + 1
+    put(0x31C, 'I', compressed_flag)
+    put(0x854, 'I', 20)                      # default view distance
+    pals = b''.join(bytes(c for rgb in pal for c in rgb) for pal in SHAPES_PALETTES)
+    gvrt = b''.join(struct.pack('<3f', *v) for v in SHAPES_VERTICES)
+    mats = b''.join(struct.pack('<8fiI', *[c for uv in uvs for c in uv], tex, flags)
+                    for uvs, tex, flags in SHAPES_MAPPINGS)
+    tex = b''.join(struct.pack('<4i', w, h, pal, 0) + bytes(px(x, y) for y in range(h) for x in range(w))
+                   for w, h, pal, px in SHAPES_TEXTURES)
+    return b''.join([_sec('B3D FILE', bytes(H)), _sec('B3D_PALS', pals), _sec('B3D_GMAP', gmap),
+                     _sec('B3D_GVRT', gvrt), _sec('B3D_LVRT', bytes(12)), _sec('B3D_MAT ', mats),
+                     _sec('B3D_TEX ', tex), _sec('B3D_AMAP', _shapes_amap()), _sec('B3D_END1', b'')])
+
+
+def shapes_file():
+    """SHAPES as a compressed .B3D: the raw header with the flag set, then a literal-only stream."""
+    image = shapes_image(compressed_flag=1)
+    return image[:B3D_RAW_HEADER] + lzss_encode(image[B3D_RAW_HEADER:], 'literal')
+
+
+# Patched copies of SHAPES (decompressed): (id, patch, outcome, detail). patch: [(offset, struct
+# format, value)], or an int (cut the image there). outcome:
+#   'error'  the geometry is refused; detail = the offset the error names (the texture stage
+#            reports the version 294 header itself, and the geometry is then not attempted);
+#   'face'   exported, with the polygons in detail untextured;
+#   'warn'   exported unchanged, with a warning.
+# m01..m15 are the level-geometry specification's mutation tests; x01..x05 the fork's own rules
+# (a non-finite vertex and a version below 278 are refused; a version from 278 to 292 is read
+# with a warning; a quad with the triangle UV flag and a non-finite UV make a face untextured).
+SHAPES_MUTATIONS = [
+    ('m01', [(3790, '<H', 50)], 'error', 3790),            # polygon 0 vertex index 50 (50 vertices)
+    ('m02', [(3820, '<h', 10)], 'face', [0]),              # polygon 0 front mapping 10 (10 mappings)
+    ('m03', [(3824, '<B', 3)], 'face', [0]),               # polygon 0 own texture 3 (3 textures)
+    ('m04', [(4571, '<I', 99)], 'warn', None),             # the LINK record names id 99
+    ('m05', [(3825, '<B', 5)], 'error', 3825),             # polygon 0 with 5 vertices
+    ('m06', [(3772, '<B', 0)], 'error', 3772),             # cell (0,0): a block with 0 entries
+    ('m07', [(4561, '<B', 6)], 'error', 4561),             # a LINK entry with 6 records
+    ('m08', [(76, '<I', 16)], 'error', 76),                # header: 16 GMAP entries (15)
+    ('m09', [(3768, '<I', 1139)], 'error', 4911),          # B3D_GMAP size one short: broken chain
+    ('m10', [(12, '<I', 294)], 'error', 12),               # header version 294
+    ('m11', [(84, '<I', 51)], 'error', 4912),              # header: 51 vertices (B3D_GVRT holds 50)
+    ('m12', [(80, '<I', 60)], 'error', 80),                # header: GMAP entry size 60
+    ('m13', 5024, 'error', 4912),                          # cut inside B3D_GVRT
+    ('m14', [(3820, '<h', -1)], 'face', [0]),              # polygon 0 front mapping -1
+    ('m15', [(5712, '<i', 7)], 'face', [7]),               # mapping 3 (blended polygon 7) page 7
+    ('x01', [(5040, '<f', float('inf'))], 'error', 5032),  # vertex 9 z = inf
+    ('x02', [(12, '<I', 277)], 'error', 12),               # header version 277
+    ('x03', [(12, '<I', 280)], 'warn', None),              # header version 280
+    ('x04', [(3826, '<B', 0x80)], 'face', [0]),            # quad 0 with the triangle UV flag
+    ('x05', [(5560, '<f', float('nan'))], 'face', [0, 3, 4, 6, 12]),  # mapping 0 u0 = NaN
+]
+
+
+def shapes_mutant(patch):
+    """SHAPES.dec with one SHAPES_MUTATIONS patch applied."""
+    image = bytearray(shapes_image())
+    if isinstance(patch, int):
+        return bytes(image[:patch])
+    for off, fmt, value in patch:
+        struct.pack_into(fmt, image, off, value)
+    return bytes(image)
+
+
+# ---------------------------------------------------------------------------- the geometry model
+#
+# An independent model of the tool's level geometry decoder and OBJ/MTL writer, written from the
+# fork's level-geometry specification. The tool must write exactly level_geometry_files(), and
+# refuse a level's geometry exactly where decode_geometry() raises GeometryError (same offset).
+
+GEOM_MIN_VERSION = 278          # older levels store their polygon records in another layout
+GEOM_MAX_SECTIONS = 4096        # the tool's section walk gives up after this many
+GEOM_MAX_TEXELS = 65536
+GEOM_ENTRY = struct.Struct('<4H8x3f4xhH8BH2xH10x2H')   # the fields of a 64-byte polygon entry used here
+assert GEOM_ENTRY.size == 64
+UV_PERM = ((0, 1, 2, 3), (1, 0, 3, 2), (3, 2, 1, 0), (2, 3, 0, 1), (3, 0, 1, 2), (0, 3, 2, 1), (2, 1, 0, 3),
+           (1, 2, 3, 0))
+UV_TRI = ((0, 1, 3), (0, 1, 2), (1, 2, 3), (0, 2, 3))
+FACING_AXIS = {1: (1.0, 0.0, 0.0), 2: (-1.0, 0.0, 0.0), 3: (0.0, 1.0, 0.0), 4: (0.0, -1.0, 0.0),
+               5: (0.0, 0.0, 1.0), 6: (0.0, 0.0, -1.0)}
+_TAG_CHARS = frozenset(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ')
+
+
+class GeometryError(ValueError):
+    """The level's geometry is refused; `offset` is the image offset of the problem."""
+
+    def __init__(self, offset, message):
+        super().__init__('@0x%X: %s' % (offset, message))
+        self.offset = offset
+
+
+class GeomPoly:
+    __slots__ = ('index', 'offset', 'cell', 'v', 'normal', 'mat_front', 'mat_back', 'tex_bucket', 'uv_mode',
+                 'facing', 'obj_flags', 'amap_node', 'amap_index', 'blend', 'render', 'link_id', 'coll', 'surf')
+
+
+def _is_tag(t):
+    return t[:3] == b'B3D' and t[3:4] in (b'_', b' ') and all(c in _TAG_CHARS for c in t[4:8])
+
+
+def _game_sections(img):
+    """{tag: (offset, size)} of the first section with each tag, from "B3D FILE" to "B3D_END1"."""
+    secs, pos, count = {}, 0, 0
+    while True:
+        if pos == len(img):
+            raise GeometryError(pos, 'the image ends before B3D_END1')
+        if len(img) - pos < 12:
+            raise GeometryError(pos, 'a section header is cut off')
+        if count >= GEOM_MAX_SECTIONS:
+            raise GeometryError(pos, 'more than %d sections' % GEOM_MAX_SECTIONS)
+        tag = img[pos:pos + 8]
+        if not _is_tag(tag):
+            raise GeometryError(pos, 'no section tag')
+        size = struct.unpack_from('<I', img, pos + 8)[0]
+        if size > len(img) - pos - 12:
+            raise GeometryError(pos, 'section %r runs past the end of the image' % tag)
+        secs.setdefault(tag, (pos, size))
+        count += 1
+        pos += 12 + size
+        if tag == b'B3D_END1':
+            return secs
+
+
+def decode_geometry(image):
+    """The geometry of a decompressed level image, as a dict: version, grid, vertices,
+    mappings [(uv corners, page, flags)], textures [(w, h, palette)], polys [GeomPoly],
+    links [(offset, cell, [(cell_x, cell_y, id)])], blocks {cell: (flags, first poly, polys)},
+    amap [node count per moving object], warnings [(offset, text)]. Raises GeometryError."""
+    img = bytes(image)
+    if len(img) < 12 + 2200 or img[:8] != b'B3D FILE' or struct.unpack_from('<I', img, 8)[0] != 2200:
+        raise GeometryError(0, 'not a level file')
+
+    def hv(off):
+        return struct.unpack_from('<I', img, 12 + off)[0]
+
+    version = hv(0x000)
+    if version > B3D_VERSION:
+        raise GeometryError(12, 'version %d is newer than %d' % (version, B3D_VERSION))
+    if version < GEOM_MIN_VERSION:
+        raise GeometryError(12, 'version %d is older than %d' % (version, GEOM_MIN_VERSION))
+    warnings = [(12, 'version %d' % version)] if version < B3D_VERSION else []
+    for off, need in ((0x03C, 80), (0x044, 64), (0x04C, 12), (0x05C, 40)):
+        if hv(off) != need:
+            raise GeometryError(12 + off, 'header +0x%03X is %d, not %d' % (off, hv(off), need))
+    secs = _game_sections(img)
+    end1 = secs[b'B3D_END1'][0]
+    for tag in (b'B3D_PALS', b'B3D_GMAP', b'B3D_GVRT', b'B3D_MAT ', b'B3D_TEX '):
+        if tag not in secs:
+            raise GeometryError(end1, 'no %s section' % tag.decode().strip())
+    gw, gh = hv(0x028), hv(0x02C)
+    pals_n, gvrt_n, mat_n, tex_n = hv(0x020), hv(0x048), hv(0x058), hv(0x060)
+    for tag, need in ((b'B3D_PALS', 768 * pals_n), (b'B3D_GVRT', 12 * gvrt_n), (b'B3D_MAT ', 40 * mat_n)):
+        if secs[tag][1] != need:
+            raise GeometryError(secs[tag][0], '%s is %d bytes, not %d' % (tag.decode(), secs[tag][1], need))
+
+    def body(tag):
+        return secs[tag][0] + 12
+
+    flat = struct.unpack_from('<%df' % (3 * gvrt_n), img, body(b'B3D_GVRT'))
+    vertices = [flat[3 * i:3 * i + 3] for i in range(gvrt_n)]
+    for i, v in enumerate(vertices):
+        if not (math.isfinite(v[0]) and math.isfinite(v[1]) and math.isfinite(v[2])):
+            raise GeometryError(body(b'B3D_GVRT') + 12 * i, 'vertex %d is not finite' % i)
+    mappings = []
+    for i in range(mat_n):
+        f = struct.unpack_from('<8fiI', img, body(b'B3D_MAT ') + 40 * i)
+        mappings.append((((f[0], f[1]), (f[2], f[3]), (f[4], f[5]), (f[6], f[7])), f[8], f[9]))
+
+    p, end = body(b'B3D_TEX '), body(b'B3D_TEX ') + secs[b'B3D_TEX '][1]
+    textures = []
+    for i in range(tex_n):
+        if end - p < 16:
+            raise GeometryError(p, 'texture %d: header cut off' % i)
+        w, h, pal, _ = struct.unpack_from('<4i', img, p)
+        if w <= 0 or h <= 0 or w * h > GEOM_MAX_TEXELS:
+            raise GeometryError(p, 'texture %d is %dx%d' % (i, w, h))
+        if end - p - 16 < w * h:
+            raise GeometryError(p, 'texture %d: pixels cut off' % i)
+        textures.append((w, h, pal))
+        p += 16 + w * h
+    if p != end:
+        raise GeometryError(p, '%d bytes after the textures' % (end - p))
+
+    p, end = body(b'B3D_GMAP'), body(b'B3D_GMAP') + secs[b'B3D_GMAP'][1]
+    polys, links, blocks = [], [], {}
+    entries = 0
+    cell, cells = 0, gw * gh
+    while cell < cells:
+        if p >= end:
+            raise GeometryError(p, 'B3D_GMAP ends before cell %d' % cell)
+        count = img[p]
+        if count == 0xFF:
+            p += 1
+            cell += 1
+            continue
+        if count == 0:
+            raise GeometryError(p, 'a block with 0 entries')
+        if p + 16 + 64 * count > end:
+            raise GeometryError(p, 'a block runs past the end of B3D_GMAP')
+        first = len(polys)
+        for j in range(count):
+            eo = p + 16 + 64 * j
+            if img[eo] == 0xFF and img[eo + 1] == 0xFF:
+                n = img[eo + 2]
+                if not 1 <= n <= 5:
+                    raise GeometryError(eo + 2, 'a LINK entry with %d records' % n)
+                recs = [struct.unpack_from('<hhII', img, eo + 4 + 12 * k) for k in range(n)]
+                links.append((eo, cell, [(cx, cy, lid) for cx, cy, _, lid in recs]))
+                continue
+            f = GEOM_ENTRY.unpack_from(img, eo)
+            nverts = f[10]
+            if nverts not in (3, 4):
+                raise GeometryError(eo + 0x25, 'a polygon with %d vertices' % nverts)
+            for k in range(nverts):
+                if f[k] >= gvrt_n:
+                    raise GeometryError(eo + 2 * k, 'vertex index %d of %d' % (f[k], gvrt_n))
+            q = GeomPoly()
+            q.index, q.offset, q.cell, q.v, q.normal = len(polys), eo, cell, f[:nverts], f[4:7]
+            (q.mat_front, q.mat_back, q.tex_bucket, _, q.uv_mode, q.facing, q.obj_flags, q.amap_node,
+             q.amap_index, q.blend, q.render, q.link_id, q.coll, q.surf) = f[7:21]
+            polys.append(q)
+        blocks[cell] = (img[p + 1], first, len(polys) - first)
+        entries += count
+        p += 16 + 64 * count
+        cell += 1
+    if p != end:
+        raise GeometryError(p, '%d bytes after the last cell' % (end - p))
+    if len(blocks) != hv(0x038):
+        raise GeometryError(12 + 0x038, '%d blocks, the header says %d' % (len(blocks), hv(0x038)))
+    if entries != hv(0x040):
+        raise GeometryError(12 + 0x040, '%d entries, the header says %d' % (entries, hv(0x040)))
+
+    amap = []
+    amap_n, amap_ver = hv(0x0B8), hv(0x0BC)
+    if b'B3D_AMAP' in secs and amap_ver >= 4 and amap_n > 0:
+        off, size = secs[b'B3D_AMAP']
+        if 4 * amap_n > size:
+            raise GeometryError(off, 'B3D_AMAP is too small for its size table')
+        sizes = struct.unpack_from('<%dI' % amap_n, img, off + 12)
+        p, end = off + 12 + 4 * amap_n, off + 12 + size
+        for i, sz in enumerate(sizes):
+            if sz < 0x84 or sz > end - p:
+                raise GeometryError(p, 'moving object %d does not fit' % i)
+            nodes = struct.unpack_from('<I', img, p + 0x24)[0]
+            if 0x84 + 156 * nodes > sz:
+                raise GeometryError(p, 'moving object %d: its nodes do not fit' % i)
+            amap.append(nodes)
+            p += sz
+        if p != end:
+            raise GeometryError(p, '%d bytes after the last moving object' % (end - p))
+    return {'version': version, 'grid': (gw, gh), 'vertices': vertices, 'mappings': mappings,
+            'textures': textures, 'polys': polys, 'links': links, 'blocks': blocks, 'amap': amap,
+            'warnings': warnings}
+
+
+def check_links(g):
+    """(LINK records, records naming no target, targets whose link id an earlier one uses)."""
+    seen, shared = set(), 0
+    for q in g['polys']:
+        if q.render & 0x100:
+            shared += q.link_id in seen
+            seen.add(q.link_id)
+    gw, gh = g['grid']
+    records = unresolved = 0
+    for _, _, recs in g['links']:
+        for cx, cy, lid in recs:
+            records += 1
+            block = g['blocks'].get(cx + cy * gw) if 0 <= cx < gw and 0 <= cy < gh else None
+            found = bool(block) and bool(block[0] & 0x04) and any(
+                g['polys'][k].render & 0x100 and g['polys'][k].link_id == lid
+                for k in range(block[1], block[1] + block[2]))
+            unresolved += not found
+    return records, unresolved, shared
+
+
+def _fmt6(x):
+    """An OBJ number: exact, 6 decimals, ties to even (Python's %f), never -0.000000."""
+    s = '%.6f' % x
+    return '0.000000' if s == '-0.000000' else s
+
+
+def _newell(vertices, q):
+    nx = ny = nz = 0.0
+    k = len(q.v)
+    for i in range(k):
+        x0, y0, z0 = vertices[q.v[i]]
+        x1, y1, z1 = vertices[q.v[(i + 1) % k]]
+        nx += (y0 - y1) * (z0 + z1)
+        ny += (z0 - z1) * (x0 + x1)
+        nz += (x0 - x1) * (y0 + y1)
+    return nx, ny, nz
+
+
+def effective_normal(vertices, q):
+    """(normal, keep): the stored normal when finite and not near zero, else the reversed Newell
+    normal, else the facing class axis, else +Z; keep = the stored order is counter-clockwise
+    about it (otherwise the face is written reversed, vertex 0 first)."""
+    N = _newell(vertices, q)
+    L = math.sqrt(N[0] * N[0] + N[1] * N[1] + N[2] * N[2])
+    n = q.normal
+    if all(math.isfinite(c) for c in n) and math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) >= 1e-6:
+        pass
+    elif L > 1e-12:
+        n = (-N[0] / L, -N[1] / L, -N[2] / L)
+    else:
+        n = FACING_AXIS.get(q.facing, (0.0, 0.0, 1.0))
+    nl = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+    keep = L >= 1e-9 and (N[0] * n[0] + N[1] * n[1] + N[2] * n[2]) > 1e-6 * L * nl
+    return n, keep
+
+
+def front_texture(g, q, rule='game'):
+    """The page a polygon's front side is textured with, or None: rule 'game' = its own texture
+    when opaque, its mapping's when blended; rule 'mat' = always its mapping's."""
+    if not 0 <= q.mat_front < len(g['mappings']):
+        return None
+    t = q.tex_bucket if (rule == 'game' and q.blend == 0) else g['mappings'][q.mat_front][1]
+    return t if 0 <= t < len(g['textures']) else None
+
+
+def poly_uvs(corners, uv_mode, nverts):
+    """UVs per stored vertex (the game's corner tables), or None for a quad with the triangle flag."""
+    perm = UV_PERM[uv_mode & 7]
+    if uv_mode & 0x80:
+        if nverts > 3:
+            return None
+        return [corners[perm[t]] for t in UV_TRI[(uv_mode >> 4) & 3]]
+    return [corners[perm[k]] for k in range(nverts)]
+
+
+def geometry_text(g, name, scale=0.2, rule='game'):
+    """(OBJ text, MTL text, stats) with '\\n' line ends for decoded geometry `g`."""
+    S = f32(scale)
+    other = 'mat' if rule == 'game' else 'game'
+    nobj = len(g['amap'])
+    V = g['vertices']
+    faces = []
+    st = {'faces': 0, 'triangles': 0, 'quads': 0, 'kept': 0, 'untextured': [], 'rule_differs': 0, 'vt': 0,
+          'categories': {}}
+    for q in g['polys']:
+        if q.obj_flags & 0x10:
+            rank, cat = nobj + 1, 'hidden'
+        elif q.obj_flags & 0x04 and q.amap_index < nobj:
+            rank, cat = 1 + q.amap_index, 'amap%d' % q.amap_index
+        else:
+            rank, cat = 0, 'static'
+        n, keep = effective_normal(V, q)
+        tex = front_texture(g, q, rule)
+        st['rule_differs'] += front_texture(g, q, other) != tex
+        uvs = None
+        if tex is not None:
+            uvs = poly_uvs(g['mappings'][q.mat_front][0], q.uv_mode, len(q.v))
+            if uvs is None or not all(math.isfinite(c) for uv in uvs for c in uv):
+                tex = uvs = None
+        if tex is None:
+            st['untextured'].append(q.index)
+        k = len(q.v)
+        order = list(range(k)) if keep else [0] + list(range(k - 1, 0, -1))
+        faces.append((rank, q.index, cat, q, order, tex, uvs, n))
+        st['kept'] += keep
+        st['triangles' if k == 3 else 'quads'] += 1
+        st['categories'][cat] = st['categories'].get(cat, 0) + 1
+    faces.sort(key=lambda f: (f[0], f[1]))
+    st['faces'] = len(faces)
+
+    out = ['# TPM level geometry: %s (scale %s; Z up; +X right, +Y forward)' % (name, _fmt6(S)),
+           'mtllib %s.mtl' % name]
+    out += ['v %s %s %s' % (_fmt6(x * S), _fmt6(y * S), _fmt6(z * S)) for x, y, z in V]
+    first_vt, vt = [], 0
+    for _, _, _, q, order, tex, uvs, _ in faces:
+        first_vt.append(vt + 1)
+        if tex is not None:
+            for k in order:
+                out.append('vt %s %s' % (_fmt6(uvs[k][0]), _fmt6(1.0 - uvs[k][1])))
+                vt += 1
+    out += ['vn %s %s %s' % (_fmt6(f[7][0]), _fmt6(f[7][1]), _fmt6(f[7][2])) for f in faces]
+    used, cur_cat, cur_mat = set(), None, None
+    for fi, (_, _, cat, q, order, tex, uvs, _) in enumerate(faces):
+        if cat != cur_cat:
+            out += ['o ' + cat, 'g ' + cat]
+            cur_cat, cur_mat = cat, None
+        mat = 'untextured' if tex is None else 'tex%d' % tex
+        used.add(mat)
+        if mat != cur_mat:
+            out.append('usemtl ' + mat)
+            cur_mat = mat
+        if tex is None:
+            out.append('f ' + ' '.join('%d//%d' % (q.v[k] + 1, fi + 1) for k in order))
+        else:
+            out.append('f ' + ' '.join('%d/%d/%d' % (q.v[k] + 1, first_vt[fi] + j, fi + 1)
+                                       for j, k in enumerate(order)))
+    st['vt'] = vt
+    st['materials_used'] = len(used)
+
+    mtl = ['# TPM level materials: %s' % name]
+    for i in range(len(g['textures'])):
+        mtl += ['', 'newmtl tex%d' % i, 'Ka 1.000000 1.000000 1.000000', 'Kd 1.000000 1.000000 1.000000',
+                'Ks 0.000000 0.000000 0.000000', 'd 1.000000', 'illum 1', 'map_Kd %d.bmp' % i]
+    if 'untextured' in used:
+        mtl += ['', 'newmtl untextured', 'Ka 1.000000 1.000000 1.000000', 'Kd 0.500000 0.500000 0.500000',
+                'Ks 0.000000 0.000000 0.000000', 'd 1.000000', 'illum 1']
+    return '\n'.join(out) + '\n', '\n'.join(mtl) + '\n', st
+
+
+def crlf(text):
+    """Text as the tool writes it: every line ending in CRLF."""
+    return text.replace('\n', '\r\n').encode('utf-8')
+
+
+def data_line_sha256(data):
+    """SHA-256 of an OBJ/MTL file's data lines (comment and blank lines dropped), '\\n'-joined."""
+    lines = [l for l in data.decode('utf-8').replace('\r\n', '\n').split('\n') if l and not l.startswith('#')]
+    return hashlib.sha256(('\n'.join(lines) + '\n').encode('utf-8')).hexdigest()
+
+
+def level_geometry_files(image, name, scale=0.2, rule='game'):
+    """{'<name>.obj': bytes, '<name>.mtl': bytes} that default mode writes for a decompressed
+    level image, or {} when its geometry is refused."""
+    try:
+        g = decode_geometry(image)
+    except GeometryError:
+        return {}
+    obj, mtl, _ = geometry_text(g, name, scale, rule)
+    return {name + '.obj': crlf(obj), name + '.mtl': crlf(mtl)}
+
+
 # ============================================================================ LAB contents and the synthetic disc
 
 def _bmp_sample(w, h, seed):
@@ -2266,6 +2895,42 @@ def self_test():
             check(legacy == bmps, 'level %s: legacy and walk agree' % name)
         out, end, _ = lzss_decode(compress_level(image)[B3D_RAW_HEADER:])
         check(end == 'marker' and image[:B3D_RAW_HEADER] + out == image, 'level %s compresses' % name)
+        g = decode_geometry(image)
+        _, _, st = geometry_text(g, name.split('.')[0])
+        check(st['faces'] == 2 and st['kept'] == 2 and not st['untextured'],
+              'level %s: 2 faces in their stored order (%r)' % (name, st))
+    # the geometry vector: pinned bytes, the decoder's view of it, and the pinned OBJ/MTL data
+    dec, b3d = shapes_image(), shapes_file()
+    check(hashlib.sha256(dec).hexdigest() == SHAPES_DEC_SHA256, 'SHAPES.dec hash')
+    check(hashlib.sha256(b3d).hexdigest() == SHAPES_B3D_SHA256, 'SHAPES.B3D hash')
+    out, end, _ = lzss_decode(b3d[B3D_RAW_HEADER:])
+    check(end == 'marker' and dec_of(b3d[:B3D_RAW_HEADER] + out) == dec, 'SHAPES.B3D decompresses to SHAPES.dec')
+    check([s[0] for s in walk_sections(dec)][-1] == 'B3D_END1', 'SHAPES ends with B3D_END1')
+    g = decode_geometry(dec)
+    obj, mtl, st = geometry_text(g, 'SHAPES')
+    check(data_line_sha256(crlf(obj)) == SHAPES_OBJ_DATA_SHA256, 'SHAPES.obj data lines')
+    check(data_line_sha256(crlf(mtl)) == SHAPES_MTL_DATA_SHA256, 'SHAPES.mtl data lines')
+    check((st['kept'], st['untextured'], st['rule_differs'], st['vt']) == (1, [], 1, 52), 'SHAPES counts %r' % st)
+    check(st['categories'] == {'static': 12, 'amap0': 1, 'hidden': 1}, 'SHAPES categories')
+    check(check_links(g) == (1, 0, 0), 'SHAPES LINK record resolves')
+    check([q.offset for q in g['polys']] == [3788, 3868, 3932, 4012, 4092, 4156, 4237, 4318, 4398, 4479, 4639,
+                                             4703, 4783, 4847], 'SHAPES polygon offsets')
+    obj1, _, _ = geometry_text(g, 'SHAPES', scale=1.0)
+    keep = lambda text: [l for l in text.split('\n') if not l.startswith(('v ', '#'))]
+    check(keep(obj1) == keep(obj) and obj1.split('\n')[11] == 'v 1.500000 0.250000 1.500000',
+          'SHAPES at scale 1: only the v lines change')
+    for mid, patch, outcome, detail in SHAPES_MUTATIONS:
+        try:
+            gm = decode_geometry(shapes_mutant(patch))
+        except GeometryError as e:
+            check(outcome == 'error' and e.offset == detail, 'mutation %s: refused at 0x%x' % (mid, e.offset))
+            continue
+        check(outcome != 'error', 'mutation %s: not refused' % mid)
+        objm, _, stm = geometry_text(gm, 'SHAPES')
+        if outcome == 'face':
+            check(stm['untextured'] == detail, 'mutation %s: untextured %r' % (mid, stm['untextured']))
+        else:
+            check(objm == obj and (bool(gm['warnings']) or check_links(gm)[1] > 0), 'mutation %s: warning' % mid)
     for name, spec in baf_fixtures():
         data, layout = build_baf(spec)
         files = legacy_baf_outputs(data)
@@ -2304,8 +2969,8 @@ FUZZ_BAF_MODES = (0x00, 0x01, 0x0E, 0x33, 0xC2)
 
 def write_fuzz_corpus(root):
     """Seed inputs for the fuzz targets (tests/fuzz_*.cpp): OUTDIR/<target>/<file>, one folder
-    per target named after it without "fuzz_" (lab, lab_file, b3d, b3d_file, cmp, baf, z). The
-    file-level targets also get the damaged and hostile-name inputs."""
+    per target named after it without "fuzz_" (lab, lab_file, b3d, b3d_file, b3d_geom, cmp, baf,
+    z). The file-level targets also get the damaged and hostile-name inputs."""
     def put(target, name, data):
         write_file(os.path.join(root, target, name), data)
 
@@ -2329,6 +2994,14 @@ def write_fuzz_corpus(root):
             put(target, 'lzss_' + name, lzss_level_file(stream))
     for name, data in level_mutants():
         put('b3d_file', 'damaged_' + name, data)
+    for target in ('b3d', 'b3d_file', 'b3d_geom'):
+        put(target, 'shapes.b3d', shapes_file())
+        put(target, 'shapes.dec', shapes_image())
+    for name, spec in level_fixtures().items():
+        put('b3d_geom', name.lower() + '.dec', dec_of(level_file(name, spec, True)[1]))
+    for mid, patch, _, _ in SHAPES_MUTATIONS:
+        for target in ('b3d_file', 'b3d_geom'):
+            put(target, 'shapes_' + mid, shapes_mutant(patch))
 
     trans = bytes((s + d) // 2 for s in range(256) for d in range(256))
     put('cmp', 'retail.cmp', retail_cmp_bytes(PAL_A, ramp_light_table(), trans))
@@ -2358,6 +3031,10 @@ def write_all(outdir):
     for name, spec in level_fixtures().items():
         write_file(os.path.join(loose, 'level', name), level_file(name, spec, True)[0])
         write_file(os.path.join(loose, 'level_raw', name), level_file(name, spec, False)[0])
+    write_file(os.path.join(loose, 'level', 'SHAPES.B3D'), shapes_file())
+    write_file(os.path.join(loose, 'level_raw', 'SHAPES.B3D'), shapes_image())
+    for mid, patch, _, _ in SHAPES_MUTATIONS:
+        write_file(os.path.join(outdir, 'damaged', 'geometry', 'shapes_%s.b3d' % mid), shapes_mutant(patch))
     write_file(os.path.join(loose, 'z', 'multi.z'), make_is3(multi_z_members()))
     write_file(os.path.join(loose, 'lab', 'scrambled.lab'), make_lab(localize_lab_entries(), 'scrambled'))
     write_file(os.path.join(loose, 'palette', 'target.pal'), palette_bytes(PAL_D))

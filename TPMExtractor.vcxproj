@@ -126,6 +126,7 @@
   <ItemGroup>
     <ClCompile Include="b3d.cpp" />
     <ClCompile Include="b3d_decompress.cpp" />
+    <ClCompile Include="b3d_geom.cpp" />
     <ClCompile Include="baf.cpp" />
     <ClCompile Include="binreader.cpp" />
     <ClCompile Include="bmp.cpp" />
@@ -145,6 +146,7 @@
   <ItemGroup>
     <ClInclude Include="b3d.h" />
     <ClInclude Include="b3d_decompress.h" />
+    <ClInclude Include="b3d_geom.h" />
     <ClInclude Include="baf.h" />
     <ClInclude Include="binreader.h" />
     <ClInclude Include="bmp.h" />
