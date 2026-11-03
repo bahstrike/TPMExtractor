@@ -72,8 +72,11 @@ tpmextractor [options] COMMAND INPUT OUTDIR
 | `baf FILE.BAF OUTDIR` | one actor or object -> `OUTDIR/<name>/` |
 | `bafall DIR OUTDIR` | every `*.BAF` in `DIR` -> `OUTDIR/<name>/` |
 
-`<NAME>` and `<name>` are the file name up to its first `.`. `OUTDIR` is created with its parents.
-Examples:
+`<NAME>` and `<name>` are the file name up to its first `.`, in the letter case you typed for `b3d`
+and `baf`. `b3dall` and the disc run name level folders in upper case, as the original's level
+list did; `bafall` and the disc run keep each BAF file's case. A level's OBJ and MTL files keep
+only the ASCII letters, digits, `_` and `-` of `<NAME>` (see **Level geometry** under
+[What you get](#what-you-get)). `OUTDIR` is created with its parents. Examples:
 
 ```
 tpmextractor z H:/GAMEDATA/GOBS/BIG.Z work
@@ -214,6 +217,13 @@ a retail disc.
 - **Objects.** Faces are grouped as `static`, then `amap<k>`, the polygons the level's moving
   object `k` (a door, a lift) moves, at their stored rest position, then `hidden`, polygons the
   game keeps hidden or switched off.
+- **File names.** The OBJ and MTL files take the level's `<NAME>` with every character other than
+  an ASCII letter, digit, `_` or `-` replaced by `_` (one `_` for each character, also a non-ASCII
+  one), or `level` if nothing else is left. OBJ readers split the OBJ's `mtllib` line at spaces,
+  and the files are plain ASCII. So `b3d "my level.b3d" out` writes `out/my level/my_level.obj`
+  and `my_level.mtl`, and says so; retail level names are unchanged. The letter case follows
+  `<NAME>`: `b3d lower.b3d out` writes `lower.obj`, while `b3dall` and the disc run write upper
+  case.
 - **Not in the OBJ:** the back side of two-sided polygons, translucency, texture animation,
   lighting, collision and the motion of moving objects.
 

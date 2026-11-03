@@ -9,13 +9,16 @@
 //   - the UV corner tables and triangle subsets, and the quad with the triangle flag;
 //   - the effective normal (stored, Newell fallback, facing class, +Z) and the orientation rule;
 //   - the two texture rules and out-of-range indices;
-//   - decoding the level, its OBJ/MTL text, LINK checks, and the error offsets of damaged copies.
+//   - decoding the level, its OBJ/MTL text, LINK checks, and the error offsets of damaged copies;
+//   - the OBJ/MTL file name for a level name (b3d_obj_name): spaces, non-ASCII characters and
+//     stray bytes become '_', and the OBJ text names that MTL whatever the level name.
 // Exit 0 = pass, 1 = fail.
 
 #include "b3d.h"
 #include "b3d_geom.h"
 #include "binreader.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -410,6 +413,23 @@ void test_level()
                         "map_Kd 1.bmp\n",
                "MTL text");
 
+    // a level name with a space and a non-ASCII character: both comment lines and the mtllib line
+    // carry b3d_obj_name's name, nothing else changes, and the text stays ASCII
+    {
+        std::string obj2, mtl2;
+        b3d_obj_text(g, "unit level \xC3\xA9", 0.5f, GeometryTextureRule::Game, obj2, mtl2, nullptr);
+        const std::string head = "# TPM level geometry: unit_level__ (scale 0.500000; Z up; +X right, +Y forward)\n"
+                                 "mtllib unit_level__.mtl\n";
+        const std::string want_obj(expect_obj);
+        const size_t body = want_obj.find("\nv ") + 1;
+        expect_str(obj2, head + want_obj.substr(body), "OBJ text of a level named \"unit level \\xC3\\xA9\"");
+        expect_str(mtl2, "# TPM level materials: unit_level__" + mtl.substr(mtl.find('\n')),
+                   "MTL text of a level named \"unit level \\xC3\\xA9\"");
+        check(std::all_of(obj2.begin(), obj2.end(), [](char c) { return (unsigned char)c < 0x80; }) &&
+                  std::all_of(mtl2.begin(), mtl2.end(), [](char c) { return (unsigned char)c < 0x80; }),
+              "the OBJ/MTL text is ASCII whatever the level name");
+    }
+
     // the mat rule moves polygons 1 and 2 to page 1
     b3d_obj_text(g, "UNIT", 0.5f, GeometryTextureRule::Mat, obj, mtl, &st);
     check(obj.find("usemtl tex0\nf 1/1/1 4/2/1 3/3/1 2/4/1\nusemtl tex1\nf 1/5/2") != std::string::npos &&
@@ -432,6 +452,55 @@ void test_level()
     u.polys[0].link_id = 7;
     const B3dLinkCheck bad = b3d_check_links(u);
     check(bad.unresolved == 1 && bad.shared_ids == 1 && bad.issues.size() == 2, "LINK problems");
+}
+
+void test_obj_names()
+{
+    struct Case
+    {
+        const char* given;
+        const char* want;
+        const char* what;
+    };
+    const Case cases[] = {
+        {"SHAPES", "SHAPES", "a retail-style name is kept"},
+        {"lower", "lower", "the case is kept"},
+        {"my level", "my_level", "a space (OBJ readers split the mtllib line there)"},
+        {"a\tb c#d(1)", "a_b_c_d_1_", "a tab, a space, '#' and parentheses"},
+        {"x-y_z.w", "x-y_z.w", "'-', '_' and '.' are kept"},
+        {" lead", "_lead", "a leading space"},
+        {"niveau_\xC3\xA9", "niveau__", "a 2-byte UTF-8 character is one '_'"},
+        {"niveau_\xE9", "niveau__", "a byte of a Windows ANSI code page is one '_'"},
+        {"a\xE2\x82\xAC" "b", "a_b", "a 3-byte UTF-8 character"},
+        {"a\xF0\x9F\x98\x80" "b", "a_b", "a 4-byte UTF-8 character"},
+        {"a\xE2\x82" "b", "a__b", "a cut sequence: one '_' per byte"},
+        {"a\xC0\xAF" "b", "a__b", "an overlong form: one '_' per byte"},
+        {"a\xED\xA0\x80" "b", "a___b", "a UTF-16 surrogate: one '_' per byte"},
+        {"a\xF4\x90\x80\x80" "b", "a____b", "beyond U+10FFFF: one '_' per byte"},
+        {"\x80\xBF" "x", "__x", "lone continuation bytes"},
+        {"\xC3\xA9", "level", "nothing but '_' left"},
+        {"", "level", "the empty name"},
+        {"_._", "level", "only '_' and '.'"},
+        {"-", "-", "'-' alone"},
+    };
+    for (const Case& c : cases)
+        expect_str(b3d_obj_name(c.given), c.want, std::string("b3d_obj_name: ") + c.what);
+    expect_str(b3d_obj_name(std::string("a\0b", 3)), "a_b", "b3d_obj_name: a NUL byte");
+    // every 1- and 2-byte name: the result is ASCII from the allowed set, not longer than the name
+    // (or "level"), and b3d_obj_name keeps it as it is
+    const char* allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-";
+    int bad = 0;
+    for (int a = 0; a < 256; a++)
+        for (int b = -1; b < 256; b++) {
+            std::string s(1, (char)a);
+            if (b >= 0)
+                s += (char)b;
+            const std::string r = b3d_obj_name(s);
+            if (r.empty() || r.size() > std::max<size_t>(s.size(), 5) || b3d_obj_name(r) != r ||
+                r.find_first_not_of(allowed) != std::string::npos)
+                bad++;
+        }
+    check(bad == 0, "b3d_obj_name on every 1- and 2-byte name: " + std::to_string(bad) + " bad result(s)");
 }
 
 void test_damaged()
@@ -502,6 +571,7 @@ int main()
     test_numbers();
     test_uvs();
     test_level();
+    test_obj_names();
     test_damaged();
     std::printf("unit_b3d_geom: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

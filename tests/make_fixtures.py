@@ -35,8 +35,9 @@ Besides the writers, the module holds independent models that the test runner co
 against:
   legacy_baf_outputs()   the original tool's BAF read order and output, file by file;
   legacy_b3d_outputs()   the original tool's level texture dump from a decompressed image;
-  decode_geometry(), geometry_text(), level_geometry_files()
-                         the level geometry decoder and the OBJ/MTL files of default mode;
+  decode_geometry(), geometry_text(), level_geometry_files(), obj_name()
+                         the level geometry decoder and the OBJ/MTL files of default mode, and
+                         the name those files take for a level name;
   lab_outputs()          LAB extraction from the stored offsets and from the sequential read;
   is3_outputs()          the files a .Z archive holds;
   lzss_decode(), dcl_explode(), walk_sections(): reference readers used by --self-test and by
@@ -52,6 +53,7 @@ import argparse
 import hashlib
 import math
 import os
+import re
 import struct
 import sys
 
@@ -2418,8 +2420,26 @@ def poly_uvs(corners, uv_mode, nverts):
     return [corners[perm[k]] for k in range(nverts)]
 
 
+_OBJ_NAME_BAD = re.compile(r'[^A-Za-z0-9_.-]')
+
+
+def obj_name(name):
+    """The name of a level's OBJ and MTL files (and of the OBJ's mtllib reference) for the level
+    name `name` (str, or bytes as a POSIX file name holds them): every character other than an
+    ASCII letter, digit, '_', '.' or '-' becomes '_', and 'level' when only '_' and '.' are left.
+    This is the tpm2jk kit's obj_name without its upper-casing, written the kit's way: the bytes
+    are decoded as UTF-8 with "surrogateescape" (a byte that is not part of a well-formed UTF-8
+    character becomes one character of its own), and a regular expression replaces characters."""
+    if isinstance(name, bytes):
+        name = name.decode('utf-8', 'surrogateescape')
+    out = _OBJ_NAME_BAD.sub('_', name)
+    return out if out.strip('._') else 'level'
+
+
 def geometry_text(g, name, scale=0.2, rule='game'):
-    """(OBJ text, MTL text, stats) with '\\n' line ends for decoded geometry `g`."""
+    """(OBJ text, MTL text, stats) with '\\n' line ends for decoded geometry `g` of the level
+    `name`; both files name obj_name(name)."""
+    name = obj_name(name)
     S = f32(scale)
     other = 'mat' if rule == 'game' else 'game'
     nobj = len(g['amap'])
@@ -2504,14 +2524,15 @@ def data_line_sha256(data):
 
 
 def level_geometry_files(image, name, scale=0.2, rule='game'):
-    """{'<name>.obj': bytes, '<name>.mtl': bytes} that default mode writes for a decompressed
-    level image, or {} when its geometry is refused."""
+    """{'<stem>.obj': bytes, '<stem>.mtl': bytes}, stem = obj_name(name), that default mode writes
+    for a decompressed level image of the level `name`, or {} when its geometry is refused."""
     try:
         g = decode_geometry(image)
     except GeometryError:
         return {}
     obj, mtl, _ = geometry_text(g, name, scale, rule)
-    return {name + '.obj': crlf(obj), name + '.mtl': crlf(mtl)}
+    stem = obj_name(name)
+    return {stem + '.obj': crlf(obj), stem + '.mtl': crlf(mtl)}
 
 
 # ============================================================================ LAB contents and the synthetic disc
@@ -2919,6 +2940,16 @@ def self_test():
     keep = lambda text: [l for l in text.split('\n') if not l.startswith(('v ', '#'))]
     check(keep(obj1) == keep(obj) and obj1.split('\n')[11] == 'v 1.500000 0.250000 1.500000',
           'SHAPES at scale 1: only the v lines change')
+    # OBJ/MTL file names: ASCII, nothing an OBJ reader splits (one '_' per UTF-8 character or stray byte)
+    for given, want in (('SHAPES', 'SHAPES'), ('lower', 'lower'), ('my level', 'my_level'), ('a#b(1)', 'a_b_1_'),
+                        ('x-y_z.w', 'x-y_z.w'), ('niveau_\u00e9', 'niveau__'), (b'niveau_\xc3\xa9', 'niveau__'),
+                        (b'niveau_\xe9', 'niveau__'), (b'a\xe2\x82b', 'a__b'), (b'a\xf0\x9f\x98\x80b', 'a_b'),
+                        ('\u00e9', 'level'), ('', 'level'), ('__', 'level'), ('-', '-')):
+        check(obj_name(given) == want, 'obj_name(%r) is %r, not %r' % (given, obj_name(given), want))
+    objn, mtln, _ = geometry_text(g, 'my level')
+    check(objn.split('\n')[1] == 'mtllib my_level.mtl' and objn.replace('my_level', 'SHAPES') == obj
+          and mtln.replace('my_level', 'SHAPES') == mtl,
+          'geometry_text: a level named "my level" names my_level.mtl, and nothing else changes')
     for mid, patch, outcome, detail in SHAPES_MUTATIONS:
         try:
             gm = decode_geometry(shapes_mutant(patch))

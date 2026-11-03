@@ -18,7 +18,9 @@ default mode, and checks:
   - level geometry: the OBJ/MTL files default mode writes for every level fixture equal an
     independent model's (make_fixtures.level_geometry_files), the SHAPES vector's data lines equal
     the pinned hashes, the geometry options, and patched copies of SHAPES are refused, written
-    untextured or written with a warning, as the specification's mutation tests say;
+    untextured or written with a warning, as the specification's mutation tests say; levels named
+    with spaces, punctuation or non-ASCII characters get ASCII OBJ/MTL names that the mtllib line
+    names (make_fixtures.obj_name);
   - the level decompressor (b3d_decompress_file, through the unit_b3d_decompress helper) against
     an independent decoder and, given one (--ref-b3d-decompress), a build of the original decoder;
   - damaged inputs are reported and skipped, never crash or hang; names from data never leave the
@@ -56,6 +58,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True          # no __pycache__ next to the sources
@@ -1909,6 +1912,86 @@ def t_geometry_mutations(ctx):
             obj, mtl = geo.get(name + '.obj', b''), geo.get(name + '.mtl', b'')
             pb.check(b'\r\nusemtl untextured\r\nf 1//1 4//1 3//1 2//1\r\n' in obj and obj.count(b'\r\nvt ') == 48
                      and b'\r\nnewmtl untextured\r\n' in mtl, '%s: polygon 0 is not written untextured' % label)
+    pb.done()
+
+
+def ansi_name_ok(name):
+    """False on Windows when the ANSI code page cannot hold `name`: the tool takes its arguments
+    and opens files through the ANSI ("A") functions, as the original did."""
+    if os.name != 'nt':
+        return True
+    try:
+        name.encode('mbcs')
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def upper_ascii(s):
+    """`s` with a-z in upper case, as the tool names the levels a folder scan finds."""
+    return ''.join(c.upper() if 'a' <= c <= 'z' else c for c in s)
+
+
+def nfc(s):
+    return unicodedata.normalize('NFC', s)
+
+
+@test('b3d.geometry_names')
+def t_geometry_names(ctx):
+    """Levels named with spaces, punctuation or non-ASCII characters (spec 9.1: the OBJ/MTL files
+    are ASCII, and OBJ readers split the mtllib line at white space): the level folder keeps the
+    name, while the OBJ file, the MTL file and the OBJ's mtllib line take make_fixtures.obj_name of
+    it, with the case as given to b3d and in upper case from b3dall. Retail-style names are kept."""
+    pb = Problems()
+    root = fresh_dir(ctx.path('geometry_names'))
+    dec, b3d = mf.shapes_image(), mf.shapes_file()
+    names = ['my level', 'lower', 'a#b(1)', 'x-y_z', ' lead', 'niveau_\u00e9', '\u00e9\u00e9']
+    if sys.platform.startswith('linux'):
+        names.append(os.fsdecode(b'bad\xe9name'))      # not UTF-8: the stray byte is one character
+    names = [n for n in names if ansi_name_ok(n)]
+
+    def folders(out):
+        """{folder name in NFC: path} of the level folders in `out`."""
+        return {nfc(d): os.path.join(out, d) for d in os.listdir(out)} if os.path.isdir(out) else {}
+
+    def check_level(level_dir, stem, label):
+        files = read_tree(level_dir)
+        compare_files(files, level_outputs_default(dec, stem), label, pb)
+        obj, mtl = files.get(stem + '.obj', b''), files.get(stem + '.mtl', b'')
+        pb.check([l for l in obj.split(b'\r\n') if l.startswith(b'mtllib')] == [b'mtllib %s.mtl' % stem.encode('ascii')],
+                 '%s: the OBJ does not name %s.mtl' % (label, stem))
+        pb.check(obj and mtl and max(obj + mtl) < 0x80, '%s: the OBJ/MTL text is not ASCII' % label)
+
+    for i, name in enumerate(names):
+        stem = mf.obj_name(name)
+        src = write(os.path.join(root, 'in%d' % i, name + '.b3d'), b3d)
+        out = os.path.join(root, 'out%d' % i)
+        r = ctx.tool('--no-pause', 'b3d', src, out)
+        label = 'b3d %r' % name
+        if not sound_run(r, pb, what=label):
+            continue
+        pb.check(not r.warnings(), '%s: warnings %s' % (label, r.warnings()[:3]))
+        found = folders(out)
+        if pb.check(list(found) == [nfc(name)], '%s: folders %r, expected one named as the level' % (label, sorted(found))):
+            check_level(found[nfc(name)], stem, label)
+        # an info line names the files when their name differs from the level's
+        note = b'level geometry files are named %s.obj' % stem.encode('ascii')
+        pb.check((note in r.out) == (stem != name), '%s: the line naming the files is %s' %
+                 (label, 'missing' if stem != name else 'printed for a name that was kept'))
+    # b3dall names the levels it finds in upper case (a-z only), and their OBJ/MTL files with them
+    folder = fresh_dir(os.path.join(root, 'b3dall_in'))
+    for name in names:
+        write(os.path.join(folder, name + '.b3d'), b3d)
+    out = os.path.join(root, 'b3dall_out')
+    r = ctx.tool('--no-pause', 'b3dall', folder, out)
+    if sound_run(r, pb, what='b3dall with these names'):
+        pb.check(not r.warnings(), 'b3dall with these names: warnings %s' % r.warnings()[:3])
+        found = folders(out)
+        want = {nfc(upper_ascii(n)): mf.obj_name(upper_ascii(n)) for n in names}
+        pb.check(set(found) == set(want), 'b3dall with these names: folders %r' % sorted(found))
+        for up, stem in sorted(want.items()):
+            if up in found:
+                check_level(found[up], stem, 'b3dall %r' % up)
     pb.done()
 
 

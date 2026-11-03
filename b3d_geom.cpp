@@ -129,6 +129,33 @@ bool write_text_file(const std::string& path, const std::string& text, std::stri
     return w.close(err);
 }
 
+// The length of the well-formed UTF-8 sequence that starts at s[i] (Unicode Table 3-7: no
+// overlong forms, no surrogates, nothing above U+10FFFF), or 1 when none does. Each byte of an
+// ill-formed sequence then counts as one character, as Python's "surrogateescape" decoding (the
+// kit's file names on POSIX) counts it.
+size_t utf8_length(const std::string& s, size_t i)
+{
+    const size_t left = s.size() - i;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data()) + i;
+    auto in = [&](size_t k, unsigned lo, unsigned hi) {
+        if (k >= left)
+            return false;
+        const unsigned v = p[k];
+        return v >= lo && v <= hi;
+    };
+    const unsigned c = p[0];
+    if (c >= 0xC2u && c <= 0xDFu)
+        return in(1, 0x80u, 0xBFu) ? 2 : 1;
+    if (c >= 0xE0u && c <= 0xEFu)
+        return in(1, c == 0xE0u ? 0xA0u : 0x80u, c == 0xEDu ? 0x9Fu : 0xBFu) && in(2, 0x80u, 0xBFu) ? 3 : 1;
+    if (c >= 0xF0u && c <= 0xF4u)
+        return in(1, c == 0xF0u ? 0x90u : 0x80u, c == 0xF4u ? 0x8Fu : 0xBFu) && in(2, 0x80u, 0xBFu) &&
+                       in(3, 0x80u, 0xBFu)
+                   ? 4
+                   : 1;
+    return 1;
+}
+
 } // namespace
 
 // ------------------------------------------------------------------------------- decoding
@@ -540,12 +567,33 @@ std::string b3d_obj_number(double v)
     return s;
 }
 
+std::string b3d_obj_name(const std::string& level_name)
+{
+    std::string out;
+    out.reserve(level_name.size());
+    bool named = false;  // a character other than '_' and '.' is left
+    for (size_t i = 0; i < level_name.size();) {
+        const char c = level_name[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+            c == '.') {
+            out += c;
+            named = named || (c != '_' && c != '.');
+            i++;
+        } else {
+            out += '_';
+            i += utf8_length(level_name, i);
+        }
+    }
+    return named ? out : std::string("level");
+}
+
 // ------------------------------------------------------------------------------------ export
 
 void b3d_obj_text(const B3dGeometry& g, const std::string& level_name, float scale, GeometryTextureRule rule,
                   std::string& obj, std::string& mtl, B3dObjStats* stats)
 {
     B3dObjStats st;
+    const std::string name = b3d_obj_name(level_name);  // the MTL's file name, ASCII
     const double S = (double)scale;  // positions: the exact double product of two float32 values
     const GeometryTextureRule other =
         rule == GeometryTextureRule::Game ? GeometryTextureRule::Mat : GeometryTextureRule::Game;
@@ -613,10 +661,10 @@ void b3d_obj_text(const B3dGeometry& g, const std::string& level_name, float sca
 
     obj.clear();
     obj.reserve(g.vertices.size() * 34 + faces.size() * 140 + 256);
-    obj += "# TPM level geometry: " + level_name + " (scale ";
+    obj += "# TPM level geometry: " + name + " (scale ";
     append_number(obj, S);
     obj += "; Z up; +X right, +Y forward)\n";
-    obj += "mtllib " + level_name + ".mtl\n";
+    obj += "mtllib " + name + ".mtl\n";
     for (const B3dVertex& v : g.vertices) {
         obj += "v ";
         append_number(obj, (double)v.x * S);
@@ -663,10 +711,10 @@ void b3d_obj_text(const B3dGeometry& g, const std::string& level_name, float sca
         const Face& f = faces[fi];
         const B3dPoly& p = g.polys[f.poly];
         if (!cat_started || f.rank != cat) {
-            const std::string name = f.rank == 0             ? std::string("static")
-                                     : f.rank == hidden_rank ? std::string("hidden")
-                                                             : format("amap%llu", (unsigned long long)(f.rank - 1));
-            obj += "o " + name + "\ng " + name + '\n';
+            const std::string group = f.rank == 0             ? std::string("static")
+                                      : f.rank == hidden_rank ? std::string("hidden")
+                                                              : format("amap%llu", (unsigned long long)(f.rank - 1));
+            obj += "o " + group + "\ng " + group + '\n';
             if (f.rank != 0 && f.rank != hidden_rank)
                 st.moving_objects++;
             cat_started = true;
@@ -692,7 +740,7 @@ void b3d_obj_text(const B3dGeometry& g, const std::string& level_name, float sca
     }
     st.materials_used = (uint64_t)std::count(used.begin(), used.end(), true) + (st.untextured ? 1 : 0);
 
-    mtl = "# TPM level materials: " + level_name + "\n";
+    mtl = "# TPM level materials: " + name + "\n";
     for (size_t i = 0; i < g.textures.size(); i++)
         mtl += format("\nnewmtl tex%zu\nKa 1.000000 1.000000 1.000000\nKd 1.000000 1.000000 1.000000\n"
                       "Ks 0.000000 0.000000 0.000000\nd 1.000000\nillum 1\nmap_Kd %zu.bmp\n",
@@ -720,9 +768,15 @@ bool b3d_export_geometry(const std::vector<uint8_t>& image, const std::string& n
     for (const B3dGeomIssue& w : links.issues)
         log::warn_at(name, w.offset, "level geometry: %s\n", w.message.c_str());
 
+    // The OBJ's mtllib line names <stem>.mtl, so both files take that name (b3d_obj_name).
+    const std::string stem = b3d_obj_name(level_name);
+    if (stem != level_name)
+        log::info("%s: the level geometry files are named %s.obj and %s.mtl (in their names, characters other "
+                  "than ASCII letters, digits, '_' and '-' become '_')\n",
+                  name.c_str(), stem.c_str(), stem.c_str());
     std::string obj, mtl;
     B3dObjStats st;
-    b3d_obj_text(g, level_name, opts.scale, opts.geometry_texture_rule, obj, mtl, &st);
+    b3d_obj_text(g, stem, opts.scale, opts.geometry_texture_rule, obj, mtl, &st);
     if (st.untextured)
         log::warn_at(name, g.polys[(size_t)st.first_untextured].offset,
                      "level geometry: %llu polygon(s) exported with the material \"untextured\"; the first, polygon "
@@ -731,8 +785,8 @@ bool b3d_export_geometry(const std::vector<uint8_t>& image, const std::string& n
                      st.untextured_reason.c_str());
 
     std::string obj_path, mtl_path, why;
-    if (!platform::safe_output_path(dumpdir, level_name + ".obj", obj_path, &why) ||
-        !platform::safe_output_path(dumpdir, level_name + ".mtl", mtl_path, &why)) {
+    if (!platform::safe_output_path(dumpdir, stem + ".obj", obj_path, &why) ||
+        !platform::safe_output_path(dumpdir, stem + ".mtl", mtl_path, &why)) {
         log::error("%s: level geometry not exported: %s\n", name.c_str(), why.c_str());
         return false;
     }

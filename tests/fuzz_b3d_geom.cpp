@@ -6,7 +6,9 @@
 // compressed level file (decompressed first, as process_b3d does). Whatever the input, decoding
 // either throws ParseError or yields geometry whose OBJ text is consistent: one face per polygon
 // with 3 or 4 corners, every v/vt/vn index in range, one vn per face, and as many vt lines as the
-// corners of the textured faces; both texture rules; the LINK check.
+// corners of the textured faces; both texture rules; the LINK check. The input's first bytes also
+// serve as a level name: b3d_obj_name must make an ASCII file name of it, and the OBJ text must
+// name that MTL file and stay ASCII.
 
 #include "b3d.h"
 #include "b3d_decompress.h"
@@ -14,6 +16,7 @@
 #include "binreader.h"
 #include "log.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -79,6 +82,24 @@ void check_obj(const std::string& obj, const tpmx::B3dGeometry& g, const tpmx::B
         broken("OBJ line counts do not match the geometry");
 }
 
+bool ascii(const std::string& s)
+{
+    return std::all_of(s.begin(), s.end(), [](char c) { return (unsigned char)c < 0x80; });
+}
+
+// The input's first bytes as a level name. Its OBJ/MTL file name is non-empty, holds only
+// [A-Za-z0-9_.-], is no longer than the name (or "level"), and stays the same on a second pass.
+std::string level_name_of(const uint8_t* data, size_t size)
+{
+    const std::string given(reinterpret_cast<const char*>(data), std::min<size_t>(size, 64));
+    const std::string stem = tpmx::b3d_obj_name(given);
+    if (stem.empty() || stem.size() > std::max<size_t>(given.size(), 5) || tpmx::b3d_obj_name(stem) != stem ||
+        stem.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") !=
+            std::string::npos)
+        broken("b3d_obj_name made a bad file name");
+    return given;
+}
+
 } // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
@@ -87,6 +108,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
     (void)silent;
     if (size > kMaxInput)
         return 0;
+    const std::string level_name = level_name_of(data, size);
     std::vector<uint8_t> image(data, data + size);
     if (size >= tpmx::kB3dRawHeaderSize) {
         uint32_t flag;
@@ -123,9 +145,15 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
     for (int rule = 0; rule < 2; rule++) {
         std::string obj, mtl;
         tpmx::B3dObjStats st;
-        tpmx::b3d_obj_text(g, "LVL", rule ? 1.0f : 0.2f,
+        tpmx::b3d_obj_text(g, rule ? std::string("LVL") : level_name, rule ? 1.0f : 0.2f,
                            rule ? tpmx::GeometryTextureRule::Mat : tpmx::GeometryTextureRule::Game, obj, mtl, &st);
         check_obj(obj, g, st);
+        const std::string mtllib = "\nmtllib " + tpmx::b3d_obj_name(rule ? std::string("LVL") : level_name) + ".mtl\n";
+        const size_t first_end = obj.find('\n');
+        if (first_end == std::string::npos || obj.compare(first_end, mtllib.size(), mtllib) != 0)
+            broken("the OBJ's second line does not name the MTL file");
+        if (!ascii(obj) || !ascii(mtl))
+            broken("the OBJ/MTL text is not ASCII");
         if (st.untextured != 0 && mtl.find("\nnewmtl untextured\n") == std::string::npos)
             broken("untextured faces without the untextured material");
     }

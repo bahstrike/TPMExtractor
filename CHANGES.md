@@ -34,7 +34,9 @@ fork" notice near the top; new files say so in their header.
 ### Command line
 
 - Commands `all`, `z`, `lab`, `b3d`, `b3dall`, `baf`, `bafall` (`tpmextractor DiscDir DumpDir` is
-  `all`). Each command's `OUTDIR` is created with its parents.
+  `all`). Each command's `OUTDIR` is created with its parents. `b3d` and `baf` name their output
+  folder after the file name as typed (up to its first `.`), in the case typed; `b3dall` names
+  level folders in upper case, as the disc run does; `bafall` keeps each file's case.
 - Exit status: 0 success (warnings allowed), 1 some files could not be processed, 2 usage error or
   fatal error. Usage errors print a short synopsis to stderr; `--help` prints everything.
 - Options may appear anywhere; `--opt value` and `--opt=value` both work; `--` ends the options.
@@ -224,6 +226,13 @@ behaviour and refuses it on the command line):
     holds a non-finite UV, or a quad flagged as a triangle in its UV mode is written with the grey
     material `untextured`, with a warning. No retail polygon is. LINK entries are checked (each
     record must name a target; link ids must be unique), and problems are warnings.
+  - File names: the OBJ, the MTL and the OBJ's `mtllib` line use `<NAME>` with every character
+    other than an ASCII letter, digit, `_` or `-` replaced by `_` (one `_` per character: a
+    well-formed UTF-8 sequence or any other byte), or `level` if nothing else is left, so that
+    OBJ readers, which split `mtllib` at white space, find the MTL, and both files are ASCII.
+    `b3d "my level.b3d" out` writes `out/my level/my_level.obj` (an info line says so). Retail
+    names are unchanged. The case follows `<NAME>`: as typed for `b3d`, upper case for `b3dall`
+    and the disc run.
   - Numbers have 6 decimals, correctly rounded with ties to even, never `-0.000000`; lines end in
     CRLF like the tool's other text files. A summary line per level gives the vertex, face, moving,
     hidden, kept-order and untextured counts, the faces the other texture rule would texture
@@ -303,16 +312,17 @@ behaviour and refuses it on the command line):
 - Unit tests: `unit_layer` (platform, BMP, reader, options), `unit_textout` (number formatting),
   `unit_jkout` (MAT and CMP encoders), `unit_b3d_decompress` (the level decoder), `unit_b3d_geom`
   (the geometry decoder and OBJ/MTL writer: number format, UV corner tables, normals and winding,
-  texture rules, LINK checks, error offsets of damaged levels).
+  texture rules, LINK checks, error offsets of damaged levels, OBJ/MTL file names).
 - Level geometry: `make_fixtures.py` builds the specification's synthetic test vector (14 abstract
   polygons on a 5 x 3 grid with generated palettes and pixels, covering every UV mode, both
   texture rules, LINK entries, moving and hidden polygons and the special cases), pinned by
   SHA-256, and holds an independent model of the decoder and the OBJ/MTL writer. The runner checks
   the tool's OBJ/MTL against the model and the pinned data-line hashes (compressed and not, every
-  geometry option, `b3dall`, `--legacy`, usage errors), and runs the specification's mutation tests
-  plus the fork's own: each patched copy must be refused at the right offset, written with
-  untextured faces, or written with a warning. With `TPM_DISC`, every level's OBJ/MTL is compared
-  with the model byte for byte, and the disc run with `b3dall`.
+  geometry option, `b3dall`, `--legacy`, usage errors, levels named with spaces, punctuation or
+  non-ASCII characters), and runs the specification's mutation tests plus the fork's own: each
+  patched copy must be refused at the right offset, written with untextured faces, or written
+  with a warning. With `TPM_DISC`, every level's OBJ/MTL is compared with the model byte for
+  byte, and the disc run with `b3dall`.
 - Fuzz targets `tests/fuzz_*.cpp` with libFuzzer (clang) or a replay driver (`-DTPMX_FUZZ=ON`):
   in memory the LAB directory, the B3D section walk and LZSS decoder, the level geometry decoder
   with its OBJ text (`fuzz_b3d_geom`), and CMPs; and through the tool's file entry points, BAF

@@ -87,7 +87,8 @@ const char kCommandHelp[] =
     "  baf FILE.BAF OUTDIR    one actor -> OUTDIR/<name>/ (colormap, MATs, BMPs, 3DO, KEYs)\n"
     "  bafall DIR OUTDIR      every *.BAF file in DIR -> OUTDIR/<name>/\n"
     "  <NAME> and <name> are the file name up to its first '.'. Levels found by a directory\n"
-    "  scan get <NAME> in upper case, as the original's level list.\n"
+    "  scan get <NAME> in upper case, as the original's level list. In the OBJ/MTL file\n"
+    "  names, characters of <NAME> other than ASCII letters, digits, '_' and '-' become '_'.\n"
     "\n";
 
 const char kHelpNotes[] =

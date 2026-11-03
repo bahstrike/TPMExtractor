@@ -246,6 +246,16 @@ int b3d_front_texture(const B3dGeometry& g, const B3dPoly& p, GeometryTextureRul
 // never "-0.000000" (format_fixed, so every platform writes the same bytes).
 std::string b3d_obj_number(double v);
 
+// The name the OBJ and MTL files take for a level named `level_name` (<NAME>), as the tpm2jk
+// kit's obj_name makes it, without its upper-casing: every character other than an ASCII letter,
+// digit, '_', '.' or '-' becomes '_' (OBJ readers split the mtllib line at white space, and the
+// files are ASCII), and the result is "level" when nothing but '_' and '.' is left (the empty name
+// too). A character is a well-formed UTF-8 sequence (Unicode Table 3-7) or any other single
+// byte, so "niveau_\xC3\xA9" (UTF-8) and "niveau_\xE9" (a Windows ANSI code page) both give
+// "niveau__". The case is kept; retail names (A-Z) are unchanged. The result is never longer
+// than `level_name` or "level", and b3d_obj_name(b3d_obj_name(s)) == b3d_obj_name(s).
+std::string b3d_obj_name(const std::string& level_name);
+
 struct B3dObjStats
 {
     uint64_t vertices = 0;
@@ -275,13 +285,15 @@ struct B3dObjStats
 //     counter-clockwise order (b3d_poly_keeps_order), untextured faces as "f v//vn";
 //   - the MTL: one material tex<i> per B3D_TEX entry, with "map_Kd <i>.bmp" (the files
 //     process_b3d writes next to it), and "untextured" when a face uses it.
-// `level_name` is <NAME> (the OBJ names <NAME>.mtl). `scale` is used as the float it is.
+// `level_name` is <NAME>: the OBJ names b3d_obj_name(<NAME>).mtl, and both comment lines carry
+// that name too, so the text is ASCII whatever the name. `scale` is used as the float it is.
 void b3d_obj_text(const B3dGeometry& g, const std::string& level_name, float scale, GeometryTextureRule rule,
                   std::string& obj, std::string& mtl, B3dObjStats* stats);
 
 // For process_b3d (default mode, --geometry obj): decodes the image, logs the warnings and LINK
-// problems, and writes <dumpdir>/<level_name>.obj and .mtl (CRLF). `name` is the file name used
-// in messages. Returns false, after logging the error with file and offset, if the geometry was
+// problems, and writes <dumpdir>/<stem>.obj and <stem>.mtl (CRLF), stem = b3d_obj_name(level_name)
+// (an info line names them when stem differs from level_name). `name` is the file name used in
+// messages. Returns false, after logging the error with file and offset, if the geometry was
 // refused or could not be written; nothing is written then.
 bool b3d_export_geometry(const std::vector<uint8_t>& image, const std::string& name, const std::string& dumpdir,
                          const std::string& level_name, const Options& opts);
