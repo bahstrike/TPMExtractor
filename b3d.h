@@ -1,6 +1,142 @@
 // Strike
 // Bad Ass Hackers 2021-2024
+// Modified 2026 in the TPMExtractor fork (see CHANGES.md): new entry point signature with Options;
+// bounds-checked section walk, named header fields and level loading; level geometry export
+// (b3d_geom.h).
 
 #pragma once
 
-void b3dexperiment(const char* szLevelFile, const char* szDumpDir, bool deleteDecomp);
+#include "options.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace tpmx {
+
+// Processes one level file (the original b3dexperiment()):
+//   - creates <level_dump_root>/<NAME>/ (NAME = the file name of b3d_path as given, up to its
+//     first '.'; the file is opened through platform::find_ci, so callers pass the canonical
+//     upper-case name and get the original's directory names on any file system),
+//   - decompresses the level in memory,
+//   - writes every B3D_TEX texture as <level_dump_root>/<NAME>/<i>.bmp (opts.bmp), coloured
+//     with its B3D_PALS palette (no colour key),
+//   - writes the decompressed image as <level_dump_root>/<NAME>/<NAME>.dec if
+//     opts.keep_decompressed,
+//   - in default mode with opts.geometry Obj (the default), writes the level geometry as
+//     <level_dump_root>/<NAME>/<NAME>.obj and <NAME>.mtl, whose materials name the <i>.bmp
+//     textures (b3d_geom.h); a level whose geometry fails its checks gets none, and an error.
+// Default mode walks the section chain (offsets and sizes checked against the file), reads the
+// palettes and textures only from inside their sections, accepts an image that is not
+// compressed (such as a kept .dec), and warns about anything unusual. --legacy reads the level as
+// the original did: it searches the image for the first "B3D_PALS" and "B3D_TEX" bytes, reads
+// from there, and writes and then deletes <NAME>.dec; both modes write the same files from every
+// retail level.
+// Returns false, after logging the reason with file and offset, if the level could not be
+// processed completely. Textures that could be read are still written.
+//
+// Level files embed no other files: on the retail disc DFLT.CMP, DFLT.MAT and the BMP, TXT and
+// SPR files are entries of big.lab, which the disc run writes to <dump>/biglab/ (DFLT.CMP there
+// is a retail-format colormap that --palette accepts).
+bool process_b3d(const std::string& b3d_path, const std::string& level_dump_root, const Options& opts);
+
+// ------------------------------------------------------------------ level file structure
+//
+// A decompressed level is a chain of sections: char tag[8] ("B3D" + '_' or ' ' + a 4-character
+// name padded with spaces); uint32 size (little-endian); the body. The game reads the chain from
+// "B3D FILE" (a 2,200-byte header) to "B3D_END1" and skips tags it does not know; editor-only
+// sections follow, up to "B3D_END2" at the end of the file.
+
+const size_t kB3dSectionHeaderSize = 12;
+const uint32_t kB3dHeaderBodySize = 2200;   // the "B3D FILE" body
+const uint32_t kB3dVersion = 293;           // header version of every retail level; the game rejects newer ones
+const size_t kB3dPaletteSize = 768;         // one B3D_PALS palette: 256 x (r, g, b)
+const size_t kB3dTextureHeaderSize = 16;    // int32 width, height, palette index, reserved (0);
+                                            // width*height 8-bit indices follow
+const int kB3dGameMaxTextures = 64;         // the game keeps at most this many level textures
+const int64_t kB3dGameMaxTexels = 65536;    // and loads textures of at most this many texels
+const size_t kB3dMaxSections = 4096;        // sanity limit for the walk (retail levels have 32 to 34)
+const int kB3dMaxTextures = 1024;           // sanity limit for textures written per level (retail: 8 to 16)
+const int64_t kB3dMaxTextureTexels = (int64_t)4096 * 4096;  // sanity limit for one texture's size
+
+// Header fields used by this file and by decoders: uint32 values at these offsets into the
+// "B3D FILE" body (file offset = kB3dSectionHeaderSize + body offset).
+const size_t kB3dHdrVersion = 0x000;          // kB3dVersion on the retail disc
+const size_t kB3dHdrNumPalettes = 0x020;      // B3D_PALS holds this many 768-byte palettes
+const size_t kB3dHdrGridW = 0x028;            // B3D_GMAP and B3D TMAP grid: cells in X
+const size_t kB3dHdrGridH = 0x02C;            //   ... and in Y
+const size_t kB3dHdrGmapBlocks = 0x038;       // non-empty B3D_GMAP cells
+const size_t kB3dHdrGmapEntries = 0x040;      // 64-byte B3D_GMAP entries (polygons and links)
+const size_t kB3dHdrNumVertices = 0x048;      // 12-byte B3D_GVRT records
+const size_t kB3dHdrNumMappings = 0x058;      // 40-byte B3D_MAT records
+const size_t kB3dHdrNumTextures = 0x060;      // B3D_TEX records
+const size_t kB3dHdrNumLights1 = 0x068;       // B3D_LIT1 records
+const size_t kB3dHdrNumLights2 = 0x070;       // B3D_LIT2 records (no B3D_LIT2 section when 0)
+const size_t kB3dHdrNumMovers = 0x0B8;        // B3D_AMAP records
+const size_t kB3dHdrMoverVersion = 0x0BC;     // the game reads B3D_AMAP only when this is >= 4
+const size_t kB3dHdrCompressed = 0x31C;       // file offset 0x328 (see b3d_decompress.h)
+const size_t kB3dHdrEditorLightSize = 0x84C;  // B3D_TLIT record size
+
+// The uint32 header field at `body_offset` of a level image, or 0 if the image is too short.
+uint32_t b3d_header_u32(const uint8_t* image, size_t size, size_t body_offset);
+
+struct B3dSection
+{
+    std::string tag;          // the 8 tag bytes as stored, e.g. "B3D_TEX " (padding kept)
+    uint64_t offset = 0;      // file offset of the 12-byte section header
+    uint32_t size_field = 0;  // the size the header stores
+    uint64_t extent = 0;      // the bytes the body really occupies (see b3d_walk_sections)
+
+    uint64_t body() const { return offset + kB3dSectionHeaderSize; }
+    uint64_t end() const { return body() + extent; }
+};
+
+struct B3dWalk
+{
+    std::vector<B3dSection> sections;  // in file order
+    bool game_part_complete = false;   // the chain is intact from "B3D FILE" through "B3D_END1"
+    bool complete = false;             // ... and on to the exact end of the file
+    uint64_t stop_offset = 0;          // where the walk stopped (the file size when complete)
+    std::string problem;               // why the walk stopped early ("" when complete)
+
+    // The first section with exactly this 8-byte tag (e.g. "B3D_TEX "), or nullptr.
+    const B3dSection* find(const char* tag8) const;
+};
+
+// Walks the section chain of a decompressed level image. The first section must be
+// "B3D FILE" with a 2,200-byte body. Every section header and body must fit in the image; the
+// walk stops at the first one that does not, at a missing tag, or after kB3dMaxSections.
+// The game part ends at "B3D_END1". After it, two editor sections store a size that is not
+// their length, and their extent is computed instead (both rules hold for every retail level):
+//   "B3D TMAP"  the size overcounts the cell stream (one byte per non-empty cell); the extent is
+//               the stream itself: kB3dHdrGridW x kB3dHdrGridH cells, each the byte 0xFF
+//               (empty) or a 12-byte cell header whose first byte is a count n, followed by
+//               n 20-byte references;
+//   "B3D_TLIT"  the size counts only the first group of light records; the extent is
+//               (kB3dHdrNumLights1 + kB3dHdrNumLights2) records of kB3dHdrEditorLightSize bytes.
+B3dWalk b3d_walk_sections(const uint8_t* data, size_t size);
+
+struct B3dImageInfo
+{
+    uint64_t file_size = 0;       // bytes read from the file
+    bool was_compressed = false;  // the file's "compressed" flag was set and its data was decoded
+    bool truncated = false;       // the compressed data ended without its end marker
+    uint64_t trailing_bytes = 0;  // input bytes after the end marker, at the end of the file (0 on the retail disc)
+};
+
+// Reads a level file and returns its decompressed image, the bytes --keep-decompressed writes as
+// <NAME>.dec. A file whose 32-bit "compressed" flag (offset 0x328) is 0, such as a kept .dec,
+// is returned as it is. Returns false and sets *err on failure; when info->truncated, `image`
+// still holds everything that could be decoded.
+bool b3d_load_image(const std::string& path, std::vector<uint8_t>& image, B3dImageInfo* info, std::string* err);
+
+// ------------------------------------------------------------------ level geometry
+//
+// b3d_geom.h decodes the geometry sections (B3D_GMAP, B3D_GVRT, B3D_MAT, B3D_TEX, B3D_AMAP) from
+// the image b3d_load_image() returns, using b3d_walk_sections() for the game part of the chain,
+// and writes the OBJ/MTL files. The editor sections after B3D_END1 (B3D TMAP, B3D TLIB,
+// B3D_TPLY) hold a tile-based copy of the same polygons; the game never reads them, and neither
+// does the export.
+
+} // namespace tpmx

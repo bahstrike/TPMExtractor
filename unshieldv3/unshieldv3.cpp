@@ -1,6 +1,10 @@
+// Modified 2026 in the TPMExtractor fork (see CHANGES.md): include <iomanip> for std::setw
+// (MSVC and libstdc++ provide it transitively, libc++ does not). The fork itself extracts
+// through zextract.cpp; extract() below is kept as Strike left it.
 #include "unshieldv3.h"
 #include "ISArchiveV3.h"
 #include <iostream>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 using namespace std;

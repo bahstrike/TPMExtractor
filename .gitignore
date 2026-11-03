@@ -1,0 +1,46 @@
+# TPMExtractor fork (Apache-2.0). Build output of CMake, the Makefile and Visual Studio.
+/build/
+/out/
+.vs/
+/Debug/
+/Release/
+/x64/
+*.user
+*.o
+*.obj
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exe
+
+# Python bytecode (tests/make_fixtures.py is imported by tests/run_tests.py)
+__pycache__/
+*.pyc
+
+# Never commit anything extracted from game data (dumps, BAF/MAT/BMP/3DO/KEY/CMP files, level
+# OBJ/MTL files, decompressed archives). Keep dumps outside the repository. The patterns below
+# are a safety net for the file types the tool reads and writes (any letter case).
+*.[bB][aA][fF]
+*.[bB]3[dD]
+*.[dD][eE][cC]
+*.[lL][aA][bB]
+*.[zZ]
+*.[mM][aA][tT]
+*.[bB][mM][pP]
+*.[cC][mM][pP]
+*.[pP][aA][lL]
+*.3[dD][oO]
+*.3[dD][oO].txt
+*.[kK][eE][yY]
+*.[kK][eE][yY].txt
+*.[wW][aA][vV]
+*.[sS][pP][rR]
+[rR][eE][mM][aA][iI][nN].[hH][eE][xX]
+*.[gG][cC][fF]
+*.[oO][bB][jJ]
+*.[mM][tT][lL]
+# The dump's archive folders: game text from them uses extensions this repository also uses.
+[bB][iI][gG][lL][aA][bB]/
+[lL][oO][cC][aA][lL][iI][zZ][eE][lL][aA][bB]/
+[vV][oO][iI][cC][eE][lL][aA][bB]/
