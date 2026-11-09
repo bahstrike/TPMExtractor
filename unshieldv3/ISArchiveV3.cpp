@@ -14,6 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified 2026 in the TPMExtractor fork (see CHANGES.md): a malformed archive makes the
+// constructor throw std::runtime_error (with the file offset) instead of failing an assert()
+// or reading past the data: the three header checks, short reads in read(), readString8() and
+// readString16(), and table chunks shorter than their fields or cut off by the end of the file.
+// Valid archives are read exactly as before. Changed lines are marked "(fork)". decompress() is
+// unchanged; the fork does not call it (zextract.cpp decompresses with blast() itself).
+
 #include "ISArchiveV3.h"
 #include <algorithm>
 #include <cassert>
@@ -33,6 +40,25 @@ public:
     uint16_t file_count;
 };
 
+// (fork) Reports a malformed archive.
+[[noreturn]] static void corrupt(const std::string& what, std::streamoff at) {
+    std::ostringstream os;
+    os << what << " at offset 0x" << std::hex << std::uppercase << at;
+    throw std::runtime_error(os.str());
+}
+
+// (fork) Skips the rest of a table chunk after the `used` bytes of its fields (upstream:
+// fin.ignore(chunk_size - used), which silently skipped nothing when the chunk was too short).
+static void skipChunkRest(std::ifstream& fin, uint16_t chunk_size, size_t used) {
+    const std::streamoff at = fin.tellg();
+    if (chunk_size < used)
+        corrupt("Table of contents entry shorter than its fields", at);
+    const std::streamsize n = std::streamsize(chunk_size - used);
+    fin.ignore(n);
+    if (fin.gcount() != n)
+        corrupt("Unexpected end of archive", at);
+}
+
 
 ISArchiveV3::ISArchiveV3(const std::filesystem::path& apath)
     : m_path(apath)
@@ -46,17 +72,20 @@ ISArchiveV3::ISArchiveV3(const std::filesystem::path& apath)
         throw std::runtime_error(os.str());
     }
     uint64_t file_size = fs::file_size(apath);
-    assert(file_size > sizeof(Header));
+    if (file_size <= sizeof(Header))  // (fork) was assert()
+        throw std::runtime_error("Not an InstallShield v3 archive (smaller than its header)");
     fin.read(reinterpret_cast<char*>(&hdr), sizeof(Header));
-    assert(hdr.signature1 == 0x8C655D13 && hdr.signature2 == 0x02013a);
-    assert(hdr.toc_address < file_size);
+    if (!fin || hdr.signature1 != 0x8C655D13 || hdr.signature2 != 0x02013a)  // (fork) was assert()
+        throw std::runtime_error("Not an InstallShield v3 archive (no signature at offset 0)");
+    if (hdr.toc_address >= file_size)  // (fork) was assert()
+        corrupt("Table of contents offset beyond the end of the archive, header field", 0x29);
     fin.seekg(hdr.toc_address, std::ios::beg);
 
     for (int i = 0; i < hdr.dir_count; i++) {
         uint16_t file_count = read<uint16_t>();
         uint16_t chunk_size = read<uint16_t>();
         std::string name = readString16();
-        fin.ignore(chunk_size - uint16_t(name.length()) - 6);
+        skipChunkRest(fin, chunk_size, name.length() + 6);  // (fork)
         directories.push_back({name, file_count});
     }
 
@@ -79,7 +108,7 @@ ISArchiveV3::ISArchiveV3(const std::filesystem::path& apath)
             (void)u3;
             f.volume_start = read<uint8_t>();
             f.name = readString8();
-            fin.ignore(chunk_size - uint16_t(f.name.length()) - 30);
+            skipChunkRest(fin, chunk_size, f.name.length() + 30);  // (fork)
 
             if (directory.name.length()) {
                 f.full_path = directory.name + "\\" + f.name;
@@ -195,14 +224,21 @@ std::vector<uint8_t> ISArchiveV3::decompress(const std::string& full_path) {
 
 template<class T> T ISArchiveV3::read() {
     T re;
+    const std::streamoff at = fin.tellg();  // (fork)
     fin.read(reinterpret_cast<char*>(&re), sizeof(re));
+    if (!fin)  // (fork) short read
+        corrupt("Unexpected end of archive", at);
     return re;
 }
 
 std::string ISArchiveV3::readString8() {
     uint8_t len = read<uint8_t>();
+    if (len == 0) return "";  // (fork) as readString16: &buf[0] of an empty vector is undefined
     std::vector<char> buf(len);
+    const std::streamoff at = fin.tellg();  // (fork)
     fin.read(&buf[0], len);
+    if (!fin)  // (fork) short read
+        corrupt("Unexpected end of archive", at);
     return std::string(buf.begin(), buf.end());
 }
 
@@ -210,7 +246,10 @@ std::string ISArchiveV3::readString16() {
     uint16_t len = read<uint16_t>();
     if (len == 0) return "";  // Strike: fix crash on empty string
     std::vector<char> buf(len);
+    const std::streamoff at = fin.tellg();  // (fork)
     fin.read(&buf[0], len);
+    if (!fin)  // (fork) short read
+        corrupt("Unexpected end of archive", at);
     return std::string(buf.begin(), buf.end());
 }
 

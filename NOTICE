@@ -1,0 +1,25 @@
+TPMExtractor (fork)
+
+Original TPMExtractor: Strike / Bad Ass Hackers, 2021-2024
+  https://github.com/bahstrike/TPMExtractor
+  KnightCop - Project lead
+  Strike (@bahstrike) - Code, File analysis
+  shiny (@shinyquagsire23) - .B3D decompression
+  Wolfgang Frisch (@wfr) - .Z decompression
+
+Fork changes: Copyright 2026 the TPMExtractor fork contributors (see CHANGES.md).
+
+Licensed under the Apache License, Version 2.0 (see LICENSE). Files changed by the fork carry a
+"Modified 2026 in the TPMExtractor fork" notice; files added by the fork say so in their header.
+
+This product includes third-party code:
+
+- unshieldv3 (unshieldv3/): extraction of InstallShield v3 (.Z) archives.
+  Copyright (c) 2019 Wolfgang Frisch. Licensed under the Apache License, Version 2.0
+  (unshieldv3/LICENSE). Changed by the fork as marked in the files.
+
+- blast (unshieldv3/blast.c, unshieldv3/blast.h): decompressor for the PKWare Data Compression
+  Library format. Copyright (C) 2003, 2012, 2013 Mark Adler. zlib license (the notice in
+  unshieldv3/blast.h). blast.c is an altered source version, marked as such in the file.
+
+No game data is included. This project is in no way affiliated with LEC or Disney.

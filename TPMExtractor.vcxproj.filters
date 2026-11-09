@@ -1,4 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
+<!-- Modified 2026 in the TPMExtractor fork (see CHANGES.md): lists the fork's source files (CMP.* removed; sound files added). -->
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -24,19 +25,58 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="CMP.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="b3d.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="b3d_decompress.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="b3d_geom.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="baf.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="binreader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="bmp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="image.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="imuse.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="jkout.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="lab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="log.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="options.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="platform.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="sound.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="textout.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="vima.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="zextract.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="unshieldv3\blast.c">
@@ -48,21 +88,57 @@
     <ClCompile Include="unshieldv3\unshieldv3.cpp">
       <Filter>unshieldv3\Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="lab.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="CMP.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="b3d.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="b3d_decompress.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="b3d_geom.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="baf.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="binreader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="bmp.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="image.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="imuse.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="jkout.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="lab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="log.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="options.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="platform.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="sound.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="textout.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="vima.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="zextract.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="unshieldv3\blast.h">
@@ -73,9 +149,6 @@
     </ClInclude>
     <ClInclude Include="unshieldv3\unshieldv3.h">
       <Filter>unshieldv3\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="lab.h">
-      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
