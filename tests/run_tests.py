@@ -25,6 +25,11 @@ default mode, and checks:
     an independent decoder and, given one (--ref-b3d-decompress), a build of the original decoder;
   - damaged inputs are reported and skipped, never crash or hang; names from data never leave the
     output folder;
+  - sound: the voice files the tool writes (wv) equal an independent model's (make_fixtures.wv_model)
+    on synthetic files made by a test encoder; the lab command and the disc run decode voice files
+    in default mode, never with --sound none or --legacy; --legacy refuses the wv command and
+    --sound; damaged copies are refused with an error at the offset the model gives and write
+    nothing, never outside their output folder;
   - no AddressSanitizer/UndefinedBehaviorSanitizer/LeakSanitizer report in any run.
 
 Real-data suite (only when TPM_DISC is set; it is skipped otherwise): runs the tool on the disc
@@ -36,6 +41,9 @@ deleting them afterwards:
   - a default-mode run over the whole disc: every retail CMP, 8-bit MAT and 3DO is checked as
     above, and every file that default mode must not change is compared with the --legacy dump;
   - every level's OBJ/MTL against the independent geometry model, byte for byte.
+Real sound data (only when TPM_VOICE_LAB is set): your VOICE.LAB, every voice file decoded by the
+lab command; TPM_WV_MANIFEST (a manifest of the decoded PCM's SHA-256, kept outside the
+repository) makes it compare every PCM hash.
   Only counts are printed; no file content is.
 
 Exit status: 0 all selected tests passed (some may be skipped), 77 every selected test was
@@ -1085,7 +1093,9 @@ def disc(ctx):
     return ctx.memo('disc', make)
 
 
-def expected_lab_dirs(info):
+def expected_lab_dirs(info, decode=False):
+    """The archive folders of a disc run; decode: default mode, which also writes each voice file
+    of VOICE.LAB decoded (<name>.wav next to <name>.wv)."""
     exp = {}
     for n, d in mf.lab_outputs(info['big_lab'], True):
         exp['biglab/' + n] = d
@@ -1094,6 +1104,8 @@ def expected_lab_dirs(info):
     if info['voice']:
         for n, d in mf.lab_outputs(info['voice'], True):
             exp['voicelab/' + n] = d
+            if decode and n.lower().endswith('.wv'):
+                exp['voicelab/' + mf.sound_stem(n) + '.wav'] = mf.wv_expected(d)
     return exp
 
 
@@ -1456,7 +1468,7 @@ def t_disc_default(ctx):
     out, r = disc_dump(ctx, 'default')
     sound_run(r, pb)
     tree = read_tree(out)
-    exp = expected_lab_dirs(info)
+    exp = expected_lab_dirs(info, decode=True)
     compare_files({k: v for k, v in tree.items() if k.split('/')[0] in ('biglab', 'localizelab', 'voicelab')},
                   exp, 'default mode', pb)
     level_exp = {}
@@ -2209,6 +2221,215 @@ def t_unsafe(ctx):
     pb.done()
 
 
+# ============================================================================ sound (synthetic)
+
+
+def sound_inputs(ctx):
+    """The synthetic sound files: {'wv': dir, 'lab': LAB path}."""
+    def make():
+        root = fresh_dir(ctx.path('sound_in'))
+        d = {'wv': os.path.join(root, 'wv')}
+        for n, data, _ in mf.voice_fixtures():
+            write(os.path.join(d['wv'], n), data)
+        d['lab'] = write(os.path.join(root, 'lab', 'voice.lab'), mf.make_lab(mf.sound_lab_entries()))
+        return d
+    return ctx.memo('sound_inputs', make)
+
+
+# What the tool's warnings say for the model's warning kinds.
+SOUND_WARNINGS = {'datasize': 'data size', 'frames': 'not a whole number'}
+
+
+def check_sound_warnings(r, expected, label, pb):
+    """The run's warning lines against the model's [(offset, kind)], in order."""
+    warns = r.warnings()
+    ok = len(warns) == len(expected) and all(('@0x%X:' % off) in w and SOUND_WARNINGS[k] in w
+                                              for (off, k), w in zip(expected, warns))
+    pb.check(ok, '%s: warnings %r, expected %r' % (label, warns[:4], expected))
+
+
+def parse_wav(data):
+    """An independent reading of a canonical 16-bit PCM WAV: (rate, channels, samples) or None."""
+    if len(data) < 44 or data[:4] != b'RIFF' or data[8:16] != b'WAVEfmt ' or data[36:40] != b'data':
+        return None
+    riff = struct.unpack_from('<I', data, 4)[0]
+    fsize, fmt, ch, rate, byte_rate, align, bits = struct.unpack_from('<IHHIIHH', data, 16)
+    size = struct.unpack_from('<I', data, 40)[0]
+    if (riff != len(data) - 8 or fsize != 16 or fmt != 1 or bits != 16 or align != 2 * ch or byte_rate != rate * align
+            or size != len(data) - 44 or size % align):
+        return None
+    return rate, ch, len(data[44:]) // 2
+
+
+@test('sound.wv')
+def t_sound_wv(ctx):
+    """Every synthetic voice file through the wv command: the WAV equals the model's (mono and
+    stereo ADPCM, WVSM, the voice decoder's predictor quirk, escapes, clamps, a PCM size of part
+    frames, a sync block, a wrong data size, trailing bytes, one and zero samples, codes that end on
+    a byte boundary), its header reads as canonical PCM, and the warnings are the model's."""
+    pb = Problems()
+    d = sound_inputs(ctx)
+    for name, data, _ in mf.voice_fixtures():
+        out = ctx.path('wv_out', mf.sound_stem(name))
+        shutil.rmtree(out, ignore_errors=True)
+        r = ctx.tool('--no-pause', 'wv', os.path.join(d['wv'], name), out)
+        if not sound_run(r, pb, what='wv %s' % name):
+            continue
+        want = mf.wv_expected(data)
+        compare_files(read_tree(out), {mf.sound_stem(name) + '.wav': want}, 'wv %s' % name, pb)
+        m = mf.wv_model(data)
+        pb.check(parse_wav(want) == (m['rate'], m['channels'], len(m['samples'])), 'wv %s: not a canonical WAV' % name)
+        check_sound_warnings(r, m['warnings'], 'wv %s' % name, pb)
+    pb.done()
+
+
+def lab_entry_offsets(lab):
+    """{entry name: data offset} of a LAB the fixtures made."""
+    n = struct.unpack_from('<I', lab, 8)[0]
+    table = 16 + 16 * n
+    out = {}
+    for i in range(n):
+        name_off, data_off, _, _ = struct.unpack_from('<III4s', lab, 16 + 16 * i)
+        e = lab.index(b'\0', table + name_off)
+        out[lab[table + name_off:e].decode('latin-1')] = data_off
+    return out
+
+
+@test('sound.lab')
+def t_sound_lab(ctx):
+    """The lab command on a LAB with voice files: default mode writes each <name>.wv decoded to
+    <name>.wav next to it (the model's bytes); a damaged voice file is an error naming the archive's
+    file offset, its raw copy kept; a voice file whose WAV name is an entry of the archive is not
+    decoded (a warning); other names are never decoded. --sound none and --legacy write the raw
+    entries only."""
+    pb = Problems()
+    d = sound_inputs(ctx)
+    lab = open(d['lab'], 'rb').read()
+    raw = {n: b for n, b in mf.lab_outputs(lab, False)}
+    entries = {n: b for n, _, b in mf.sound_lab_entries()}
+    offsets = lab_entry_offsets(lab)
+    exp = dict(raw)
+    errors = []
+    for n, b in entries.items():
+        if not n.lower().endswith('.wv') or n == 'clash.wv':
+            continue
+        try:
+            exp[mf.sound_stem(n) + '.wav'] = mf.wv_expected(b)
+        except mf.SoundError:
+            errors.append(n)
+    out = ctx.path('lab_sound')
+    shutil.rmtree(out, ignore_errors=True)
+    r = ctx.tool('--no-pause', 'lab', d['lab'], out)
+    if sound_run(r, pb, allowed_rc=(1,), allow_errors=True, what='lab with voice files'):
+        compare_files(read_tree(out), exp, 'lab with voice files', pb)
+        for n in errors:
+            try:
+                mf.wv_model(entries[n], base=offsets[n])
+                pb.add('lab: the model decodes %s' % n)
+            except mf.SoundError as e:
+                pb.check(any(('@0x%X:' % e.offset) in l and n in l for l in r.errors()),
+                         'lab: no error names %s at 0x%X: %s' % (n, e.offset, r.errors()[:3]))
+        pb.check(any('clash.wv' in w and 'not decoded' in w for w in r.warnings()),
+                 'lab: no warning that clash.wv was not decoded: %s' % r.warnings()[:3])
+    for opts, what in ((['--sound', 'none'], '--sound none'), (['--legacy'], '--legacy')):
+        out = ctx.path('lab_sound_raw')
+        shutil.rmtree(out, ignore_errors=True)
+        r = ctx.tool(*(['--no-pause'] + opts + ['lab', d['lab'], out]))
+        if sound_run(r, pb, what='%s lab with voice files' % what):
+            compare_files(read_tree(out), raw, '%s lab with voice files' % what, pb)
+    pb.done()
+
+
+@test('sound.disc')
+def t_sound_disc(ctx):
+    """The disc run's sound: --sound none writes the default dump without the decoded voice files
+    and changes nothing else."""
+    pb = Problems()
+    info = disc(ctx)
+    root = fresh_dir(ctx.path('sound_disc'))
+    ref, _ = disc_dump(ctx, 'default')
+    out = os.path.join(root, 'o1')
+    r = ctx.tool('--no-pause', '--sound', 'none', info['root'], out)
+    if sound_run(r, pb, what='--sound none disc run'):
+        want = {k: v for k, v in read_tree(ref).items() if not (k.startswith('voicelab/') and k.endswith('.wav'))}
+        compare_files(read_tree(out), want, '--sound none disc run', pb)
+    shutil.rmtree(root, ignore_errors=True)
+    pb.done()
+
+
+@test('sound.options')
+def t_sound_options(ctx):
+    """--legacy refuses --sound and the wv command, --sound none refuses the wv command, and bad
+    --sound values are usage errors; none of them writes anything."""
+    pb = Problems()
+    d = sound_inputs(ctx)
+    info = disc(ctx)
+    wv = os.path.join(d['wv'], 'sine.wv')
+    cases = [(['--legacy', '--sound', 'wav'], [info['root']]), (['--legacy', '--sound=none'], [info['root']]),
+             (['--legacy'], ['wv', wv]), (['--sound', 'none'], ['wv', wv]), (['--sound', 'mp3'], ['wv', wv]),
+             (['--sound'], [])]
+    for opts, args in cases:
+        out = ctx.path('sound_usage_out')
+        shutil.rmtree(out, ignore_errors=True)
+        r = ctx.tool(*(['--no-pause'] + opts + args + [out]))
+        label = ' '.join(opts + [os.path.basename(a) for a in args])
+        sound_run(r, pb, allowed_rc=(2,), allow_errors=True, what=label)
+        pb.check(not os.path.exists(out), '%s: created the output folder' % label)
+    r = ctx.tool('--help')
+    pb.check(all(c in r.out for c in (b'  wv FILE.WV', b'--sound M')), '--help does not list wv and --sound')
+    pb.done()
+
+
+def sound_mutant_cases():
+    """[(command, name, bytes, expected files or None, expected error offset or None, warnings)]"""
+    cases = []
+    for name, data in mf.voice_mutants():
+        try:
+            m = mf.wv_model(data)
+            cases.append(('wv', name + '.wv', data, {name + '.wav': mf.wv_expected(data)}, None, m['warnings']))
+        except mf.SoundError as e:
+            cases.append(('wv', name + '.wv', data, None, e.offset, []))
+    return cases
+
+
+@test('robust.sound')
+def t_robust_sound(ctx):
+    """Damaged copies of the voice fixtures (cut at structure boundaries, fields overwritten): each
+    is refused with an error at the offset the model gives, writes nothing, and never anything
+    outside its output folder; the copies the model accepts are written as it says, with its
+    warnings."""
+    pb = Problems()
+    root = fresh_dir(ctx.path('damaged_sound'))
+    counts = {'refused': 0, 'accepted': 0}
+    for cmd, name, data, files, offset, warnings in sound_mutant_cases():
+        case = fresh_dir(os.path.join(root, 'case'))
+        src = write(os.path.join(case, 'in', name), data)
+        nest = fresh_dir(os.path.join(case, 'a', 'b'))
+        out = os.path.join(nest, 'out')
+        r = ctx.tool('--no-pause', '-q', cmd, src, out, timeout=ctx.damaged_timeout)
+        label = '%s %s' % (cmd, name)
+        got = read_tree(out) if os.path.isdir(out) else {}
+        pb.check(files_outside(case, ('in', 'a')) == [] and files_outside(os.path.join(case, 'a'), ('b',)) == []
+                 and files_outside(nest, ('out',)) == [], '%s: something was written outside the output folder' % label)
+        if offset is not None:
+            counts['refused'] += 1
+            if sound_run(r, pb, allowed_rc=(1,), allow_errors=True, what=label):
+                errs = r.errors()
+                pb.check(errs and ('@0x%X:' % offset) in errs[0], '%s: the error is not at 0x%X: %s'
+                         % (label, offset, errs[:2]))
+                pb.check(not got, '%s: wrote %s' % (label, sorted(got)))
+        else:
+            counts['accepted'] += 1
+            if sound_run(r, pb, what=label):
+                compare_files(got, files, label, pb)
+                check_sound_warnings(r, warnings, label, pb)
+    ctx.log('%d damaged sound files refused at the model\'s offset, %d accepted' % (counts['refused'],
+                                                                                   counts['accepted']))
+    pb.check(counts['refused'] >= 25, 'only %d damaged sound files are refused' % counts['refused'])
+    shutil.rmtree(root, ignore_errors=True)
+    pb.done()
+
+
 # ============================================================================ real-data tests (TPM_DISC)
 
 
@@ -2620,6 +2841,81 @@ def t_real_geometry(ctx):
     pb.done(summary=True)
 
 
+# ---------------------------------------------------------------------------- real sound data
+
+
+def sound_manifest(path):
+    """A tab-separated manifest with a header row: ({upper-case file name: row dict}, columns). The
+    first column is the file name; the PCM hash is the first column whose name contains "sha256"."""
+    with open(path, 'r', encoding='utf-8', newline='') as f:
+        rows = [l.rstrip('\r\n') for l in f if l.strip()]
+    head = rows[0].lstrip('#').split('\t')
+    sha = next(i for i, h in enumerate(head) if 'sha256' in h)
+    out = {}
+    for line in rows[1:]:
+        if line.startswith('#'):
+            continue
+        cells = line.split('\t')
+        row = dict(zip(head, cells))
+        row['_sha256'] = cells[sha]
+        out[cells[0].upper()] = row
+    return out, head
+
+
+def pcm_sha256(wav):
+    return hashlib.sha256(wav[44:]).hexdigest()
+
+
+@test('real.sound_voice', suite='real')
+def t_real_voice(ctx):
+    """Every voice file of your VOICE.LAB (TPM_VOICE_LAB) through the lab command: one canonical WAV
+    per .wv with the rate and channels of its header, and (with TPM_WV_MANIFEST, a manifest of the
+    decoded PCM's SHA-256) every PCM hash equal to the manifest's. Only counts are printed."""
+    lab = ctx.args.voice_lab
+    if not lab:
+        raise Skip('TPM_VOICE_LAB is not set')
+    pb = Problems()
+    out = os.path.join(real_work(ctx), 'voice')
+    r = ctx.tool('--no-pause', 'lab', lab, out, timeout=ctx.timeout * 10, real=True)
+    run_pb = Problems()
+    sound_run(r, run_pb, what='lab on VOICE.LAB')
+    pb.raw += run_pb.items
+    man = sound_manifest(ctx.args.wv_manifest)[0] if ctx.args.wv_manifest else None
+    names = os.listdir(out) if os.path.isdir(out) else []
+    voices = [n for n in names if n.lower().endswith('.wv')]
+    t = {'wav': 0, 'match': 0, 'differ': 0, 'samples': 0}
+    for n in voices:
+        wav_name = mf.sound_stem(n) + '.wav'
+        if not pb.check(wav_name in names, '%s: no %s' % (n, wav_name)):
+            continue
+        with open(os.path.join(out, n), 'rb') as f:
+            head = f.read(0x12)
+        with open(os.path.join(out, wav_name), 'rb') as f:
+            wav = f.read()
+        t['wav'] += 1
+        w = parse_wav(wav)
+        rate = struct.unpack_from('<I', head, 6)[0] if len(head) >= 0x12 else None
+        ch = struct.unpack_from('<I', head, 0xE)[0] if len(head) >= 0x12 else None
+        if pb.check(w is not None and w[0] == rate and w[1] == ch, '%s: not a canonical WAV with the rate and channels '
+                    'of its voice file' % wav_name):
+            t['samples'] += w[2]
+        if man is not None:
+            row = man.get(n.upper())
+            if row and row['_sha256'] == pcm_sha256(wav):
+                t['match'] += 1
+            else:
+                t['differ'] += 1
+                pb.add('%s: the PCM differs from the manifest (or is not in it)' % wav_name)
+    pb.check(voices and t['wav'] == len(voices), '%d voice files, %d decoded' % (len(voices), t['wav']))
+    if man is not None:
+        pb.check(t['match'] == len(man), '%d of the manifest\'s %d voice files match' % (t['match'], len(man)))
+    print('    %d voice files decoded to WAV (%d samples)%s' % (
+        t['wav'], t['samples'], '; PCM SHA-256 equal to the manifest in %d of %d' % (t['match'], len(man))
+        if man is not None else '; no TPM_WV_MANIFEST, hashes not compared'))
+    shutil.rmtree(out, ignore_errors=True)
+    pb.done(summary=True)
+
+
 # ============================================================================ main
 
 
@@ -2639,6 +2935,9 @@ def main(argv=None):
     ap.add_argument('--ref-manifest', default=env('TPM_REF_MANIFEST'), help='manifest of the original\'s output')
     ap.add_argument('--ref-undefined', default=env('TPM_REF_UNDEFINED'), help='files with masked tails (optional)')
     ap.add_argument('--real-work', default=env('TPM_WORK'), help='folder for real-data dumps (outside the source tree)')
+    ap.add_argument('--voice-lab', default=env('TPM_VOICE_LAB'), help='your VOICE.LAB (TPM_VOICE_LAB)')
+    ap.add_argument('--wv-manifest', default=env('TPM_WV_MANIFEST'),
+                    help='manifest of the decoded voice files\' PCM SHA-256 (TPM_WV_MANIFEST)')
     ap.add_argument('--keep', action='store_true', help='keep the synthetic outputs')
     ap.add_argument('--keep-real', action='store_true', help='keep the real-data dumps (game data: never share them)')
     ap.add_argument('-k', dest='only', action='append', default=[], help='run only tests whose name contains this')

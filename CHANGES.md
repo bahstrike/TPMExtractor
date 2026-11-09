@@ -34,7 +34,8 @@ fork" notice near the top; new files say so in their header.
 ### Command line
 
 - Commands `all`, `z`, `lab`, `b3d`, `b3dall`, `baf`, `bafall` (`tpmextractor DiscDir DumpDir` is
-  `all`). Each command's `OUTDIR` is created with its parents. `b3d` and `baf` name their output
+  `all`), and the sound command `wv` (see Sound), which `--legacy` refuses. Each command's
+  `OUTDIR` is created with its parents. `b3d` and `baf` name their output
   folder after the file name as typed (up to its first `.`), in the case typed; `b3dall` names
   level folders in upper case, as the disc run does; `bafall` keeps each file's case.
 - Exit status: 0 success (warnings allowed), 1 some files could not be processed, 2 usage error or
@@ -69,6 +70,7 @@ behaviour and refuses it on the command line):
 | `--[no-]debug-dumps` | on | `*.3do.txt`, `*.key.txt`, `REMAIN.HEX` |
 | `--geometry obj\|none` | obj | each level's geometry as `<NAME>.obj` and `<NAME>.mtl` next to its textures (see Levels) |
 | `--geometry-texture-rule game\|mat` | game | the texture of each OBJ face: `game` the one the game draws the polygon with, `mat` always its UV mapping's |
+| `--sound wav\|none` | wav | decode each voice file of a LAB (`lab`, the disc run's `VOICE.LAB`) to `<file>.wav` next to it (see Sound) |
 | `--keep-decompressed` | off | keep `big.lab` and `LEVEL/<NAME>/<NAME>.dec` |
 | `--[no-]pause` | off | wait for a key before exiting |
 | `-v`, `-vv`, `-q` | | verbose, debug, quiet |
@@ -258,6 +260,26 @@ behaviour and refuses it on the command line):
   than their fields are thrown errors with offsets (marked "(fork)"). With the asserts gone, the
   build no longer forces `-UNDEBUG` on the vendored code.
 
+### Sound
+
+- **Voice files** (`VOICE.LAB`, `*.WV`, "INDYWV"): decoded to canonical 16-bit PCM WAV files
+  (44-byte header, `data` right after `fmt `, as retail JK's loader reads them) at the rate and
+  channel count of the file's header. In default mode `lab` and the disc run write `<file>.wav` next
+  to each `<file>.wv` entry (any case; not when the archive has an entry of that name itself, a
+  warning); `wv FILE.WV OUTDIR` decodes one file. The original wrote the coded files only.
+- **The codec**: the voice files code their samples with VIMA ADPCM (4- to 7-bit codes by step
+  index, escapes to raw 16-bit samples, the IMA step table), read as the game's voice decoder reads
+  it, a stream header's predictor included; the WVSM block codec that decoder also selects is
+  followed too (no retail file uses it). Decoding is checked on the whole retail corpus: the PCM of
+  all 2,624 voice files equals an independent decoder's (a SHA-256 manifest kept outside the
+  repository).
+- **Checks** (each failure an error with file and offset; nothing is written for that file): the
+  header fields (16 bits, 1 or 2 channels, the stream's channel count), the sync block and the
+  codes inside the file (the decoder looks up to two bytes ahead, which it never uses); a data size
+  the game does not use that disagrees with the file, and a PCM size of part frames, are warnings.
+  Files larger than 32 MiB are refused.
+- `--legacy` never decodes and refuses `--sound` and the `wv` command, so its output is unchanged.
+
 ### Robustness
 
 - Errors name the file (and the offset where known); the run goes on with the next file.
@@ -309,10 +331,23 @@ behaviour and refuses it on the command line):
   checked as above and against `--legacy`, and (with `TPM_REF_MANIFEST`, a manifest of the
   original's output with the uninitialised tail lines masked) the `--legacy` identity test. Dumps
   go outside the source tree and are deleted.
+- Sound: `make_fixtures.py` holds an independent model of the voice reader (ported from the
+  reference decoder of the format research, with every check and error offset), a VIMA test
+  encoder, and synthetic voice files made from generated signals (sines, chirps, silence, noise,
+  full-scale squares; mono and stereo, WVSM, the voice decoder's predictor quirk, escapes and
+  clamping, part frames, codes that end on a byte boundary). The model agrees with the real
+  corpus's manifest and, where it can read the streams, with FFmpeg's decoder. The runner checks
+  `wv`, `lab` and the disc run against the model byte for byte, `--sound none` and `--legacy`, and
+  28 damaged copies, each refused at the model's offset with nothing written. With
+  `TPM_VOICE_LAB` (and the manifest `TPM_WV_MANIFEST`) a real-data test decodes your copy's every
+  voice file and compares every PCM hash.
 - Unit tests: `unit_layer` (platform, BMP, reader, options), `unit_textout` (number formatting),
   `unit_jkout` (MAT and CMP encoders), `unit_b3d_decompress` (the level decoder), `unit_b3d_geom`
   (the geometry decoder and OBJ/MTL writer: number format, UV corner tables, normals and winding,
-  texture rules, LINK checks, error offsets of damaged levels, OBJ/MTL file names).
+  texture rules, LINK checks, error offsets of damaged levels, OBJ/MTL file names), `unit_sound`
+  (the VIMA tables against closed forms, the bit reader and decoder on hand-coded streams: escapes,
+  the rounding term, clamping, channel order, the two header predictors, WVSM, read-ahead at the
+  end of the data; error offsets, WAV header bytes, output names).
 - Level geometry: `make_fixtures.py` builds the specification's synthetic test vector (14 abstract
   polygons on a 5 x 3 grid with generated palettes and pixels, covering every UV mode, both
   texture rules, LINK entries, moving and hidden polygons and the special cases), pinned by
@@ -325,8 +360,8 @@ behaviour and refuses it on the command line):
   byte, and the disc run with `b3dall`.
 - Fuzz targets `tests/fuzz_*.cpp` with libFuzzer (clang) or a replay driver (`-DTPMX_FUZZ=ON`):
   in memory the LAB directory, the B3D section walk and LZSS decoder, the level geometry decoder
-  with its OBJ text (`fuzz_b3d_geom`), and CMPs; and through the tool's file entry points, BAF
-  files (`fuzz_baf`: both parsers and every BAF writer, in
+  with its OBJ text (`fuzz_b3d_geom`), CMPs and voice files (`fuzz_wv`); and through the tool's
+  file entry points, BAF files (`fuzz_baf`: both parsers and every BAF writer, in
   `--legacy` and default mode with the BAF options), levels (`fuzz_b3d_file`: default,
   `--keep-decompressed`, `--legacy`), LAB extraction (`fuzz_lab_file`) and `.Z` extraction
   (`fuzz_z`). The file-level targets run in a scratch folder of their own and fail when anything
@@ -346,7 +381,7 @@ behaviour and refuses it on the command line):
 | `main.cpp` | options, `--legacy`, commands, level scan, exit codes; same steps and output names as before |
 | `baf.*` | real BAF layout in default mode, JK-ready 3DO/KEY values, retail CMPs and 8-bit MATs; bounded legacy read |
 | `b3d.*`, `b3d_decompress.*` | in-memory decoder with limits, section walk, checked textures, level geometry export |
-| `lab.*` | bounds-checked LAB reader, stored or sequential layout |
+| `lab.*` | bounds-checked LAB reader, stored or sequential layout; voice files decoded during extraction |
 | `CMP.h`, `CMP.cpp` | removed (replaced by `jk::legacy_cmp`, byte-identical) |
 | `unshieldv3/ISArchiveV3.cpp`, `blast.c`, `unshieldv3.cpp` | see Archives and Robustness |
 | `TPMExtractor.vcxproj`, `.filters` | the fork's source files |
@@ -355,5 +390,7 @@ behaviour and refuses it on the command line):
 | new: `zextract.*` | `.Z` extraction |
 | new: `jkout.*` | retail JK MAT and CMP writers, nearest-colour remapping, mipmaps |
 | new: `b3d_geom.*` | level geometry decoder and OBJ/MTL writer |
+| new: `vima.*` | the VIMA ADPCM decoder of the voice files |
+| new: `sound.*` | voice files to WAV, the WAV writer |
 | new: `tests/` | unit tests, end-to-end runner, fixture generator, fuzz targets |
 | new: `CMakeLists.txt`, `Makefile`, `cmake/*.cmake`, `.gitignore`, `CHANGES.md`, `NOTICE` | build files and documentation |

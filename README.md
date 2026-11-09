@@ -4,11 +4,11 @@
 > [bahstrike/TPMExtractor](https://github.com/bahstrike/TPMExtractor) by Strike (Bad Ass Hackers,
 > 2021-2024), based on its commit `2cc75d6`. The fork no longer needs Windows to build (it is
 > tested on Linux and with MinGW for Windows), fixes crashes and parsing bugs, adds commands for
-> single files, writes models and textures that retail Jedi Knight can load, and exports the
-> levels' geometry, which the original never decoded, as OBJ models. The original program's
-> output is still available, byte for byte, with `--legacy`. This README was rewritten for the
-> fork in 2026; every change is listed in [CHANGES.md](CHANGES.md). The original
-> description, credits and disclaimer are kept below.
+> single files, writes models and textures that retail Jedi Knight can load, exports the
+> levels' geometry, which the original never decoded, as OBJ models, and decodes the game's voice
+> lines to WAV files. The original program's output is still available, byte for byte, with
+> `--legacy`. This README was rewritten for the fork in 2026; every change is listed in
+> [CHANGES.md](CHANGES.md). The original description, credits and disclaimer are kept below.
 >
 > Fork improvements (2026): Andrei Kiralv/Darkahn, with Claude (Anthropic), Red in Andrei's
 > projects.
@@ -34,7 +34,9 @@ TPMExtractor is capable of processing these incoming data directly from the inst
 The output is meant for Jedi Knight: Dark Forces II ("JK") modding: models become JK `.3do` files,
 animations `.key` files, textures `.mat` files with `.cmp` colormaps, and every texture is also
 written as a `.bmp` preview. Each level's geometry becomes a Wavefront OBJ model (`<NAME>.obj` with
-its `<NAME>.mtl`) textured with the level's `.bmp` files, for Blender and other 3D tools.
+its `<NAME>.mtl`) textured with the level's `.bmp` files, for Blender and other 3D tools. The voice
+lines (`.WV` files in `VOICE.LAB`) are decoded to plain 16-bit PCM `.wav` files, which retail JK
+can load.
 
 ## Usage
 
@@ -64,19 +66,21 @@ tpmextractor [options] COMMAND INPUT OUTDIR
 
 | Command | Does |
 |---|---|
-| `all DiscDir DumpDir` | the whole disc: `GAMEDATA/GOBS/BIG.Z` -> `big.lab` -> `DumpDir/biglab/`, `LOCALIZE.LAB` -> `localizelab/`, `VOICE.LAB` -> `voicelab/`, `GAMEDATA/LEVEL/*.B3D` -> `LEVEL/<NAME>/`, `biglab/*.baf` -> `BAF/<name>/` |
+| `all DiscDir DumpDir` | the whole disc: `GAMEDATA/GOBS/BIG.Z` -> `big.lab` -> `DumpDir/biglab/`, `LOCALIZE.LAB` -> `localizelab/`, `VOICE.LAB` -> `voicelab/` (with each voice file also decoded to `.wav`), `GAMEDATA/LEVEL/*.B3D` -> `LEVEL/<NAME>/`, `biglab/*.baf` -> `BAF/<name>/` |
 | `z FILE.Z OUTDIR` | every file of an InstallShield v3 archive (`BIG.Z` holds `big.lab`) |
-| `lab FILE.LAB OUTDIR` | every file of a LAB archive (`big.lab`, `LOCALIZE.LAB`, `VOICE.LAB`) |
+| `lab FILE.LAB OUTDIR` | every file of a LAB archive (`big.lab`, `LOCALIZE.LAB`, `VOICE.LAB`); each voice file `<file>.wv` is also decoded to `<file>.wav` next to it |
 | `b3d FILE.B3D OUTDIR` | one level -> `OUTDIR/<NAME>/`: its textures `<i>.bmp` and its geometry `<NAME>.obj` with `<NAME>.mtl` |
 | `b3dall DIR OUTDIR` | every `*.B3D` in `DIR` -> `OUTDIR/<NAME>/` |
 | `baf FILE.BAF OUTDIR` | one actor or object -> `OUTDIR/<name>/` |
 | `bafall DIR OUTDIR` | every `*.BAF` in `DIR` -> `OUTDIR/<name>/` |
+| `wv FILE.WV OUTDIR` | one voice file -> `OUTDIR/<file>.wav` |
 
 `<NAME>` and `<name>` are the file name up to its first `.`, in the letter case you typed for `b3d`
 and `baf`. `b3dall` and the disc run name level folders in upper case, as the original's level
 list did; `bafall` and the disc run keep each BAF file's case. A level's OBJ and MTL files keep
 only the ASCII letters, digits, `_` and `-` of `<NAME>` (see **Level geometry** under
-[What you get](#what-you-get)). `OUTDIR` is created with its parents. Examples:
+[What you get](#what-you-get)). `<file>` is a voice file's name without its extension, in its own
+case (as typed for `wv`). `OUTDIR` is created with its parents. Examples:
 
 ```
 tpmextractor z H:/GAMEDATA/GOBS/BIG.Z work
@@ -84,6 +88,7 @@ tpmextractor lab work/big.lab work/biglab
 tpmextractor bafall work/biglab work/BAF
 tpmextractor --palette mylevel.cmp baf work/biglab/someactor.baf work/BAF
 tpmextractor --keep-decompressed b3dall H:/GAMEDATA/LEVEL work/LEVEL
+tpmextractor lab H:/GAMEDATA/GOBS/VOICE.LAB work/voicelab
 ```
 
 Exit status: 0 success (warnings allowed), 1 some files could not be processed, 2 usage error or
@@ -120,6 +125,8 @@ file. The tool waits for a key before exiting only with `--pause` (the original 
 --geometry-texture-rule R
                        game (default: the texture the game draws each polygon
                        with) or mat (always its mapping's texture)
+--sound M              wav (default: each voice file of a LAB also decoded to
+                       <name>.wav next to it) or none
 --keep-decompressed    keep big.lab and LEVEL/<name>/<name>.dec
 --[no-]pause           wait for a key before exiting (default off; the original
                        always waited)
@@ -136,7 +143,8 @@ Options may come before or after the paths; `--opt=value` works too.
 ```
 DumpDir/biglab/<entry>          every file of big.lab (big.lab itself is deleted afterwards)
 DumpDir/localizelab/<entry>     every file of LOCALIZE.LAB
-DumpDir/voicelab/<entry>        every file of VOICE.LAB
+DumpDir/voicelab/<entry>        every file of VOICE.LAB (the voice files <file>.WV)
+DumpDir/voicelab/<file>.wav     each voice file decoded (default mode)
 DumpDir/LEVEL/<NAME>/<i>.bmp    the level's textures, in their own palettes
 DumpDir/LEVEL/<NAME>/<NAME>.obj the level's geometry (default mode), with its materials in
 DumpDir/LEVEL/<NAME>/<NAME>.mtl <NAME>.mtl, which name the <i>.bmp files
@@ -227,13 +235,37 @@ a retail disc.
 - **Not in the OBJ:** the back side of two-sided polygons, translucency, texture animation,
   lighting, collision and the motion of moving objects.
 
+### Sound
+
+In default mode the voice lines are decoded to WAV files: canonical RIFF/WAVE files of 16-bit PCM
+with nothing between the `fmt ` and `data` chunks, which is what retail JK's loader reads.
+`--sound none` turns this off; `--legacy` never decodes. The original program left the voice files
+as they were stored. The format was recovered for the fork by static analysis of the game's code,
+and the decoder gives the same samples as an independent decoder on every voice file of a retail
+copy.
+
+- **Voice files** (`VOICE.LAB`, entries `*.WV`): a small header (`INDYWV`: sample rate, 16 bits,
+  channels, sizes) and one coded stream. `lab` and the disc run write `<file>.wav` next to each
+  `<file>.WV`, at the rate and channel count of its header (22,050 Hz mono on a retail disc); `wv`
+  decodes a single file. A voice file whose `.wav` name is another entry of the archive is not
+  decoded (with a warning).
+- **Checks.** Beyond decoding, the tool checks what the format promises and refuses a file, with
+  its offset, when a check fails: header fields it can decode (16 bits, 1 or 2 channels), a coded
+  stream with the header's channel count, and codes that fit in the file. A damaged file writes
+  nothing.
+
+**Decoded audio is for your own use.** Like everything the tool extracts, it is the game's data,
+from your copy of the game: keep it on your computer, and do not share it, upload it or commit it
+anywhere.
+
 ## What `--legacy` does
 
 `--legacy` reproduces the output of the original program (commit `2cc75d6`) byte for byte: the
 same files, the same names and the same bytes, including its quirks (placeholder 3DO values,
 unpadded BMP rows, the legacy 17,216-byte `.cmp`, the misread colormap-less BAF). It refuses every
-option that would change the output. Use it when you need exactly what the original wrote, or to
-check that nothing changed.
+option that would change the output, and the sound command `wv`, which the original did not have;
+it never decodes sound. Use it when you need exactly what the original wrote, or to check that
+nothing changed.
 
 It was checked on a retail disc against the original sources built unchanged (as a 32-bit
 program behind a small Windows shim, not on Windows itself): all 15,027 output files and 320
@@ -282,6 +314,8 @@ The summary; [CHANGES.md](CHANGES.md) has the details.
   by section with every size checked; `--keep-decompressed` keeps the decompressed `<NAME>.dec`.
 - **Archives:** LAB files are read through their stored offsets (the original assumed sequential
   storage); `.Z` files are decompressed with a size check, and a damaged one no longer ends the run.
+- **Sound:** the voice files, which the original left coded, are decoded to WAV (`--sound`, the
+  command `wv`; see "Sound").
 - **Tests:** unit tests and an end-to-end suite on generated, generic fixtures (boxes, pyramids,
   simple rigs; no game content), plus optional real-data tests that read your own disc.
 
@@ -379,12 +413,16 @@ TPM_DISC=/path/to/disc make check
 
 They write their dumps to a temporary folder (or `TPM_WORK`) outside the source tree and delete
 them afterwards. `TPM_REF_MANIFEST` (a manifest of the original program's output with the
-uninitialised "tail" lines masked) adds the `--legacy` identity test.
+uninitialised "tail" lines masked) adds the `--legacy` identity test. For sound, set
+`TPM_VOICE_LAB` (your `VOICE.LAB`); with `TPM_WV_MANIFEST` (a tab-separated manifest of the decoded
+PCM's SHA-256, kept outside the repository) every voice file is compared with it. The synthetic
+sound tests compare the tool with an independent model of the format (`tests/make_fixtures.py`) on
+files made by a test encoder, including damaged copies.
 
 Fuzz targets (CMake with `-DTPMX_FUZZ=ON`, best with clang and `-DTPMX_SANITIZE=ON`) cover every
 input the tool reads: BAF files through all their writers in both modes, levels and their
-geometry, LAB and `.Z` archives and colormaps. The file-level ones fail when anything is written
-outside their output folder. `ctest -L fuzz` runs each one briefly on generated seeds;
+geometry, LAB and `.Z` archives, colormaps and voice files. The file-level ones fail when anything
+is written outside their output folder. `ctest -L fuzz` runs each one briefly on generated seeds;
 `tests/CMakeLists.txt` shows how to run them for longer.
 
 ## License

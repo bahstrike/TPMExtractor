@@ -101,6 +101,13 @@ enum class GeometryTextureRule {
            // retail disc), some of which look like glitches in the game.
 };
 
+// Sound decoding (sound.h).
+enum class SoundMode {
+    None,  // archives give their voice files as they are stored. --legacy.
+    Wav,   // also each voice file of a LAB (lab, the disc run's VOICE.LAB) decoded to <name>.wav
+           // next to it. Default.
+};
+
 struct Options
 {
     bool legacy = false;              // --legacy: reproduce 2cc75d6 byte for byte
@@ -118,6 +125,7 @@ struct Options
     bool debug_dumps = true;          // write *.3do.txt, *.key.txt and REMAIN.HEX
     GeometryMode geometry = GeometryMode::Obj;  // level geometry. --legacy: None
     GeometryTextureRule geometry_texture_rule = GeometryTextureRule::Game;
+    SoundMode sound = SoundMode::Wav; // decode voice files. --legacy: None
     bool keep_decompressed = false;   // keep big.lab and LEVEL/<L>/<L>.dec
     bool pause = false;               // wait for a key before exiting
     int verbose = 0;                  // -1 quiet, 0 normal, 1 verbose, 2 debug
@@ -125,8 +133,8 @@ struct Options
 
 // Sets every output-affecting field to the original tool's behaviour (legacy = true,
 // scale 0.2, draw_scale off, angles Raw, insert offset Fixed (0,0,0.1), radius Fixed 0.1, mat8
-// off, mat16 on, bmp on, palette "", debug dumps on, geometry None, keep_decompressed off).
-// pause and verbose are kept.
+// off, mat16 on, bmp on, palette "", debug dumps on, geometry None, sound None,
+// keep_decompressed off). pause and verbose are kept.
 void apply_legacy(Options& o);
 
 struct ParsedArgs

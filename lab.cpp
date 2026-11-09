@@ -3,13 +3,14 @@
 // Modified 2026 in the TPMExtractor fork (see CHANGES.md): rewritten on BinReader with bounds
 // checks on the header, entry table, name table and data ranges; stored (default) or
 // sequential (--legacy, the original's read) layout; safe output names; chunked copies; errors
-// with file and offset instead of crashes.
+// with file and offset instead of crashes; voice files (*.wv) also decoded to WAV (--sound).
 
 #include "lab.h"
 
 #include "binreader.h"
 #include "log.h"
 #include "platform.h"
+#include "sound.h"
 #include "textout.h"
 
 #include <algorithm>
@@ -17,6 +18,8 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
+#include <utility>
 
 namespace tpmx {
 
@@ -149,6 +152,52 @@ void set_problem(LabEntry& e, uint64_t offset, const std::string& problem)
         e.problem = problem;
         e.problem_offset = offset;
     }
+}
+
+// A voice file by its name: "<something>.wv" in any letter case.
+bool is_voice_name(const std::string& name)
+{
+    return name.size() > 3 && platform::iequals_ascii(name.substr(name.size() - 3), ".wv");
+}
+
+enum class VoiceResult { Decoded, Skipped, Failed };
+
+// Decodes the voice file of entry `index` (already extracted) to <name>.wav in `out_dir`.
+// `entry_names` holds every entry name in upper case; `decoded` the upper-cased WAV names
+// written so far. Skipped (with a warning) when the archive has an entry of the WAV's name.
+VoiceResult decode_voice_entry(FILE* in, const std::string& lab_path, size_t index, const LabEntry& e,
+                               const std::string& out_dir, const std::set<std::string>& entry_names,
+                               std::map<std::string, size_t>& decoded, std::vector<uint8_t>& buf)
+{
+    const std::string what = entry_label(index, e) + ": ";
+    const std::string wav = sound_output_name(e.name, ".wav");
+    const std::string up = upper_ascii(wav);
+    const uint64_t record = entry_record_offset(index);
+    if (entry_names.count(up)) {
+        log::warn_at(lab_path, record, "%snot decoded: the archive has an entry named \"%s\"\n", what.c_str(),
+                     printable(wav).c_str());
+        return VoiceResult::Skipped;
+    }
+    std::string out, why;
+    if (!platform::safe_output_path(out_dir, wav, out, &why)) {
+        log::error_at(lab_path, record, "%s%s\n", what.c_str(), why.c_str());
+        return VoiceResult::Failed;
+    }
+    const auto ins = decoded.insert(std::make_pair(up, index));
+    if (!ins.second)
+        log::warn_at(lab_path, record, "%sits decoded \"%s\" overwrites the one of entry %zu\n", what.c_str(),
+                     printable(wav).c_str(), ins.first->second);
+    if (e.length > kMaxSoundFileSize) {
+        log::error_at(lab_path, e.read_offset, "%s%u bytes, more than the %llu bytes a voice file may have here\n",
+                      what.c_str(), e.length, (unsigned long long)kMaxSoundFileSize);
+        return VoiceResult::Failed;
+    }
+    if (!read_at(in, e.read_offset, e.length, buf)) {
+        log::error_at(lab_path, e.read_offset, "%sread error\n", what.c_str());
+        return VoiceResult::Failed;
+    }
+    return wv_write_wav(buf.data(), buf.size(), lab_path, e.read_offset, what, out) ? VoiceResult::Decoded
+                                                                                  : VoiceResult::Failed;
 }
 
 } // namespace
@@ -327,6 +376,16 @@ bool extract_lab(const std::string& lab_path, const std::string& out_dir, const 
     std::vector<uint8_t> buf(kCopyChunkSize);
     std::map<std::string, size_t> seen;  // upper-cased name -> first entry with that name
     unsigned failed = 0;
+    // Voice files are also decoded to WAV (not with --legacy, which pins --sound none).
+    const bool decode = opts.sound == SoundMode::Wav;
+    std::set<std::string> entry_names;
+    std::map<std::string, size_t> decoded;
+    std::vector<uint8_t> voice;
+    unsigned decode_failed = 0, decoded_count = 0, decode_skipped = 0;
+    if (decode)
+        for (const LabEntry& e : dir.entries)
+            if (!e.name.empty())
+                entry_names.insert(upper_ascii(e.name));
     for (size_t i = 0; i < dir.entries.size(); i++) {
         const LabEntry& e = dir.entries[i];
         std::string problem = e.problem;
@@ -344,6 +403,13 @@ bool extract_lab(const std::string& lab_path, const std::string& out_dir, const 
             log::verbose("Extracting %s\n", outfile.c_str());
             if (!copy_range(in, e.read_offset, e.length, outfile, buf, problem))
                 problem_at = e.read_offset;
+            if (problem.empty() && decode && is_voice_name(e.name)) {
+                switch (decode_voice_entry(in, lab_path, i, e, out_dir, entry_names, decoded, voice)) {
+                case VoiceResult::Decoded: decoded_count++; break;
+                case VoiceResult::Skipped: decode_skipped++; break;
+                case VoiceResult::Failed: decode_failed++; break;
+                }
+            }
         }
         if (!problem.empty()) {
             if (failed < kMaxListedEntryErrors)
@@ -354,7 +420,11 @@ bool extract_lab(const std::string& lab_path, const std::string& out_dir, const 
     std::fclose(in);
     if (failed > kMaxListedEntryErrors)
         log::error("%s: %u more entries could not be extracted\n", lab_path.c_str(), failed - kMaxListedEntryErrors);
-    return failed == 0;
+    if (decoded_count || decode_skipped || decode_failed)
+        log::info("%s: %u voice file(s) decoded to WAV%s%s\n", lab_path.c_str(), decoded_count,
+                  decode_skipped ? format(", %u not decoded (see the warnings)", decode_skipped).c_str() : "",
+                  decode_failed ? format(", %u could not be decoded", decode_failed).c_str() : "");
+    return failed == 0 && decode_failed == 0;
 }
 
 } // namespace tpmx

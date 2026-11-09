@@ -9,8 +9,9 @@
 # With -DTPMX_FUZZ=ON also short runs of the fuzz targets (label "fuzz"; see the end of this file).
 # Every test gets TPMX_EXE, TPMX_SOURCE_DIR and TPMX_TEST_TMP (a folder of its own) in its
 # environment. Optional, from the calling environment: TPM_DISC, TPM_REF_MANIFEST,
-# TPM_REF_UNDEFINED, TPM_WORK (real data), TPMX_REF_EXE and TPMX_REF_B3D_DECOMPRESS (builds of the
-# original tool and decoder, compared with when given).
+# TPM_REF_UNDEFINED, TPM_WORK, TPM_VOICE_LAB, TPM_WV_MANIFEST (real data; see tests/run_tests.py),
+# TPMX_REF_EXE and TPMX_REF_B3D_DECOMPRESS (builds of the original tool and decoder, compared with
+# when given).
 #
 #   ctest --test-dir build/<dir> --output-on-failure
 #   ctest --test-dir build/<dir> -R e2e_synthetic -V
@@ -57,11 +58,13 @@ endif()
 # ---------------------------------------------------------------------------------------------
 # Fuzz targets: each tests/fuzz_<name>.cpp defines LLVMFuzzerTestOneInput.
 #   in memory:   fuzz_lab (LAB directory), fuzz_b3d (level section walk, LZSS), fuzz_b3d_geom
-#                (level geometry decoder and OBJ/MTL text), fuzz_cmp (CMP)
+#                (level geometry decoder and OBJ/MTL text), fuzz_cmp (CMP), fuzz_wv (voice files
+#                and the VIMA decoder)
 #   file level:  fuzz_baf (process_baf: BAF parsers and every BAF writer, --legacy and default
 #                mode), fuzz_b3d_file (process_b3d, with the geometry files), fuzz_lab_file
-#                (extract_lab), fuzz_z (extract_z). These run in a scratch folder of their own and
-#                abort when anything is written outside the output folder (tests/fuzz/sandbox.h).
+#                (extract_lab, voice files decoded in default mode), fuzz_z (extract_z). These run
+#                in a scratch folder of their own and abort when anything is written outside the
+#                output folder (tests/fuzz/sandbox.h).
 #                Set TPMX_FUZZ_TMP (or TMPDIR) to a RAM disk such as /dev/shm for speed. fuzz_baf
 #                builds a full CMP for every input with a colormap: tens of inputs per second
 #                under ASan, so give it several times the others' time.

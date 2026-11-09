@@ -4,12 +4,13 @@
 // platform layer does directories, globbing and the key press), command-line options and
 // --legacy, the commands all/z/lab/b3d/b3dall/baf/bafall, a case-insensitive level scan, errors
 // that skip one file instead of ending the run, exit codes, and no key press at the end unless
-// --pause is given; level geometry (OBJ/MTL) in the level commands' help.
+// --pause is given; level geometry (OBJ/MTL) in the level commands' help; sound: the command wv
+// and, in default mode, the voice files of LAB archives decoded to WAV.
 //
 // "tpmextractor DiscDir DumpDir" (the command "all") does what the original main() did, in the
 // same order and with the same output names: BIG.Z -> big.lab -> biglab/, LOCALIZE.LAB ->
 // localizelab/, VOICE.LAB -> voicelab/, the levels -> LEVEL/<NAME>/, and every biglab/*.baf ->
-// BAF/<name>/.
+// BAF/<name>/. Default mode also decodes the voice files.
 
 #include "b3d.h"
 #include "baf.h"
@@ -18,6 +19,7 @@
 #include "log.h"
 #include "options.h"
 #include "platform.h"
+#include "sound.h"
 #include "zextract.h"
 
 #include <cstdio>
@@ -42,20 +44,21 @@ const char* const kLegacyLevels[] = {"ASSAULT.B3D", "BIGCITY.B3D", "ESPA.B3D",  
                                      "FINAL.B3D",   "GARDEN.B3D",  "GUNGA.B3D", "MAUL.B3D",
                                      "QUEEN.B3D",   "RACE.B3D",    "SWAMP.B3D"};
 
-enum class Command { All, Z, Lab, B3d, B3dAll, Baf, BafAll };
+enum class Command { All, Z, Lab, B3d, B3dAll, Baf, BafAll, Wv };
 
 struct CommandSpec
 {
     const char* name;
     Command command;
     const char* args;
+    bool sound;  // new in the fork: decodes sound (--legacy has no original output to reproduce)
 };
 
 const CommandSpec kCommands[] = {
-    {"all", Command::All, "DiscDir DumpDir"},  {"z", Command::Z, "FILE.Z OUTDIR"},
-    {"lab", Command::Lab, "FILE.LAB OUTDIR"},  {"b3d", Command::B3d, "FILE.B3D OUTDIR"},
-    {"b3dall", Command::B3dAll, "DIR OUTDIR"}, {"baf", Command::Baf, "FILE.BAF OUTDIR"},
-    {"bafall", Command::BafAll, "DIR OUTDIR"},
+    {"all", Command::All, "DiscDir DumpDir", false},    {"z", Command::Z, "FILE.Z OUTDIR", false},
+    {"lab", Command::Lab, "FILE.LAB OUTDIR", false},    {"b3d", Command::B3d, "FILE.B3D OUTDIR", false},
+    {"b3dall", Command::B3dAll, "DIR OUTDIR", false},   {"baf", Command::Baf, "FILE.BAF OUTDIR", false},
+    {"bafall", Command::BafAll, "DIR OUTDIR", false},   {"wv", Command::Wv, "FILE.WV OUTDIR", true},
 };
 
 const CommandSpec* find_command(const std::string& name)
@@ -76,19 +79,24 @@ const char kCommandHelp[] =
     "  all DiscDir DumpDir    the whole disc; the same as giving no command:\n"
     "                           GAMEDATA/GOBS/BIG.Z -> big.lab -> DumpDir/biglab/\n"
     "                           GAMEDATA/GOBS/LOCALIZE.LAB -> DumpDir/localizelab/\n"
-    "                           GAMEDATA/GOBS/VOICE.LAB -> DumpDir/voicelab/\n"
+    "                           GAMEDATA/GOBS/VOICE.LAB -> DumpDir/voicelab/ (default mode:\n"
+    "                           also each voice file decoded to <file>.wav)\n"
     "                           GAMEDATA/LEVEL/*.B3D -> DumpDir/LEVEL/<NAME>/\n"
     "                           DumpDir/biglab/*.baf -> DumpDir/BAF/<name>/\n"
     "  z FILE.Z OUTDIR        every file of an InstallShield v3 archive (BIG.Z holds big.lab)\n"
-    "  lab FILE.LAB OUTDIR    every file of a LAB archive (big.lab, LOCALIZE.LAB, VOICE.LAB)\n"
+    "  lab FILE.LAB OUTDIR    every file of a LAB archive (big.lab, LOCALIZE.LAB, VOICE.LAB);\n"
+    "                         default mode also decodes each *.wv to <file>.wav next to it\n"
     "  b3d FILE.B3D OUTDIR    one level -> OUTDIR/<NAME>/: its textures <i>.bmp and (default\n"
     "                         mode) its geometry <NAME>.obj with <NAME>.mtl\n"
     "  b3dall DIR OUTDIR      every *.B3D file in DIR -> OUTDIR/<NAME>/\n"
     "  baf FILE.BAF OUTDIR    one actor -> OUTDIR/<name>/ (colormap, MATs, BMPs, 3DO, KEYs)\n"
     "  bafall DIR OUTDIR      every *.BAF file in DIR -> OUTDIR/<name>/\n"
-    "  <NAME> and <name> are the file name up to its first '.'. Levels found by a directory\n"
-    "  scan get <NAME> in upper case, as the original's level list. In the OBJ/MTL file\n"
-    "  names, characters of <NAME> other than ASCII letters, digits, '_' and '-' become '_'.\n"
+    "  wv FILE.WV OUTDIR      one voice file -> OUTDIR/<file>.wav (16-bit PCM)\n"
+    "  <NAME> and <name> are the file name up to its first '.', <file> the file name without\n"
+    "  its extension. Levels found by a directory scan get <NAME> in upper case, as the\n"
+    "  original's level list. In the OBJ/MTL file names, characters of <NAME> other than ASCII\n"
+    "  letters, digits, '_' and '-' become '_'. The sound command wv is new in the fork: --legacy\n"
+    "  refuses it.\n"
     "\n";
 
 const char kHelpNotes[] =
@@ -516,6 +524,14 @@ int run_bafall(const std::string& input, const std::string& out_dir, const Optio
     return failed ? kExitErrors : kExitOk;
 }
 
+int run_wv(const std::string& input, const std::string& out_dir, const Options& opts)
+{
+    const std::string path = input_file(input);
+    if (path.empty() || !prepare_out_dir(out_dir))
+        return kExitFatal;
+    return process_wv(path, platform::base_name(input), out_dir, opts) ? kExitOk : kExitErrors;
+}
+
 int run_command(Command command, const std::string& input, const std::string& out_dir, const Options& opts,
                 const Palette* fallback)
 {
@@ -527,6 +543,7 @@ int run_command(Command command, const std::string& input, const std::string& ou
     case Command::B3dAll: return run_b3dall(input, out_dir, opts);
     case Command::Baf: return run_baf(input, out_dir, opts, fallback);
     case Command::BafAll: return run_bafall(input, out_dir, opts, fallback);
+    case Command::Wv: return run_wv(input, out_dir, opts);
     }
     return kExitFatal;
 }
@@ -569,9 +586,21 @@ int main(int argc, char* argv[])
     if (pos.size() == 3) {
         command = find_command(pos[0]);
         if (!command) {
-            log::error("unknown command \"%s\" (commands: all, z, lab, b3d, b3dall, baf, bafall; "
-                       "to extract a disc give only DiscDir and DumpDir)\n",
+            log::error("unknown command \"%s\" (commands: all, z, lab, b3d, b3dall, baf, bafall, wv; to extract a "
+                       "disc give only DiscDir and DumpDir)\n",
                        printable(pos[0]).c_str());
+            print_short_usage(prog);
+            return finish(kExitFatal, opts);
+        }
+        if (command->sound && opts.legacy) {
+            log::error("--legacy reproduces the original program's output; the %s command is new in the fork and has "
+                       "none\n",
+                       command->name);
+            print_short_usage(prog);
+            return finish(kExitFatal, opts);
+        }
+        if (command->sound && opts.sound == SoundMode::None) {
+            log::error("--sound none turns sound decoding off, which is what the %s command does\n", command->name);
             print_short_usage(prog);
             return finish(kExitFatal, opts);
         }

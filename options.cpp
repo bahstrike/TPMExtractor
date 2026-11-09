@@ -55,6 +55,7 @@ void apply_legacy(Options& o)
     o.debug_dumps = true;
     o.geometry = GeometryMode::None;
     o.geometry_texture_rule = GeometryTextureRule::Game;
+    o.sound = SoundMode::None;
     o.keep_decompressed = false;
 }
 
@@ -282,6 +283,18 @@ bool parse_args(int argc, const char* const* argv, ParsedArgs& out, std::string&
                 return false;
             }
             output_options.push_back(name);
+        } else if (name == "--sound") {
+            if (!take_value())
+                return false;
+            if (value == "wav") {
+                o.sound = SoundMode::Wav;
+            } else if (value == "none") {
+                o.sound = SoundMode::None;
+            } else {
+                err = "--sound must be wav or none, got \"" + value + "\"";
+                return false;
+            }
+            output_options.push_back(name);
         } else {
             err = "unknown option " + arg;
             return false;
@@ -339,6 +352,8 @@ std::string usage_text(const char* program_name)
            "  --geometry-texture-rule R\n"
            "                         game (default: the texture the game draws each polygon\n"
            "                         with) or mat (always its mapping's texture)\n"
+           "  --sound M              wav (default: each voice file of a LAB also decoded to\n"
+           "                         <name>.wav next to it) or none\n"
            "  --keep-decompressed    keep big.lab and LEVEL/<name>/<name>.dec\n"
            "  --[no-]pause           wait for a key before exiting (default off; the original\n"
            "                         always waited)\n"
@@ -376,6 +391,7 @@ std::string describe(const Options& o)
            " debug-dumps=" + (o.debug_dumps ? "on" : "off") +
            " geometry=" + (o.geometry == GeometryMode::Obj ? "obj" : "none") +
            " geometry-texture-rule=" + (o.geometry_texture_rule == GeometryTextureRule::Game ? "game" : "mat") +
+           " sound=" + (o.sound == SoundMode::Wav ? "wav" : "none") +
            " keep-decompressed=" + (o.keep_decompressed ? "on" : "off");
 }
 

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modified 2026 in the TPMExtractor fork (see CHANGES.md): lists the fork's source files (CMP.* removed). -->
+<!-- Modified 2026 in the TPMExtractor fork (see CHANGES.md): lists the fork's source files (CMP.* removed; sound files added). -->
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -137,7 +137,9 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="options.cpp" />
     <ClCompile Include="platform.cpp" />
+    <ClCompile Include="sound.cpp" />
     <ClCompile Include="textout.cpp" />
+    <ClCompile Include="vima.cpp" />
     <ClCompile Include="zextract.cpp" />
     <ClCompile Include="unshieldv3\blast.c" />
     <ClCompile Include="unshieldv3\ISArchiveV3.cpp" />
@@ -156,7 +158,9 @@
     <ClInclude Include="log.h" />
     <ClInclude Include="options.h" />
     <ClInclude Include="platform.h" />
+    <ClInclude Include="sound.h" />
     <ClInclude Include="textout.h" />
+    <ClInclude Include="vima.h" />
     <ClInclude Include="zextract.h" />
     <ClInclude Include="unshieldv3\blast.h" />
     <ClInclude Include="unshieldv3\ISArchiveV3.h" />

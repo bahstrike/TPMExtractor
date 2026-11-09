@@ -7,7 +7,7 @@
 Everything here is generated: generic names (box, rig, node_a, mat0), checker and gradient
 textures, ramp and pseudo-random palettes, boxes and pyramids. No game data is read or copied.
 
-Formats written (all little-endian):
+Formats written (little-endian unless noted):
   LAB     "LABN" archives (16-byte header, 16-byte entries, name table, data).
   BAF     actor files: 0x120-byte header, optional 0x34C-byte colormap block, materials (name +
           MAT stream), one model blob (rdModel3, rdMesh[], per-mesh arrays, TPM faces, hierarchy
@@ -21,6 +21,10 @@ Formats written (all little-endian):
           to be embedded (a default colormap, MATs, BMPs, text and sprite files) are big.lab
           entries, and the samples of them are written there, with their LAB type codes.
   .Z      InstallShield v3 archives with stored and PKWARE DCL "implode" members.
+  WV      voice files: the "INDYWV" header (little-endian fields) and a VIMA ADPCM stream (its
+          header predictor big-endian), mono or stereo, or the block-coded "WVSM" variant,
+          encoded here from generated signals (sines, chirps, noise, clipping, silence) with
+          escapes and clamps placed on purpose.
 
   SHAPES  the level-geometry test vector: 14 abstract polygons on a 5 x 3 grid covering every UV
           symmetry, the texture rules, LINK entries, moving and hidden polygons, a two-sided,
@@ -28,8 +32,9 @@ Formats written (all little-endian):
           NaN normal (shapes_image, shapes_file), and patched copies of it (SHAPES_MUTATIONS).
 
   damaged inputs: copies of the fixtures cut at structure boundaries or with one count, size or
-          offset field overwritten (baf_mutants, lab_mutants, level_mutants, z_mutants), and
-          files whose entry names try to leave the output folder (unsafe_name_*).
+          offset field overwritten (baf_mutants, lab_mutants, level_mutants, z_mutants,
+          voice_mutants), and files whose entry names try to leave the output folder
+          (unsafe_name_*).
 
 Besides the writers, the module holds independent models that the test runner compares the tool
 against:
@@ -40,6 +45,9 @@ against:
                          the name those files take for a level name;
   lab_outputs()          LAB extraction from the stored offsets and from the sequential read;
   is3_outputs()          the files a .Z archive holds;
+  wv_model()             the voice decoder, written from the format notes (independent of the
+                         tool's code; vima_decode_body() is its ADPCM reference), raising
+                         SoundError at the offset the tool must name for a damaged file;
   lzss_decode(), dcl_explode(), walk_sections(): reference readers used by --self-test and by
                          the decompressor differential.
 
@@ -2535,6 +2543,514 @@ def level_geometry_files(image, name, scale=0.2, rule='game'):
     return {stem + '.obj': crlf(obj), stem + '.mtl': crlf(mtl)}
 
 
+# ============================================================================ sound: VIMA, voice files
+#
+# The game codes voice files (INDYWV) and music blocks (MCMP) with VIMA ADPCM. Below: the tables,
+# an independent model of the tool's voice reader (ported from the sound pass's reference
+# decoders; every check and error offset as sound.h and vima.h describe them), a test encoder,
+# and a writer for synthetic voice files. Signals are generated (sines, chirps, silence, noise,
+# full-scale squares); names are generic.
+
+VIMA_STEP = (
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97,
+    107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871,
+    5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623,
+    27086, 29794, 32767)
+VIMA_WIDTH = (4,) * 45 + (5,) * 14 + (6,) * 15 + (7,) * 15
+VIMA_ADJUST = {
+    2: (-1, 4),
+    3: (-1, -1, 2, 6),
+    4: (-1, -1, -1, -1, 1, 2, 4, 6),
+    5: (-1,) * 8 + (1, 1, 1, 2, 2, 4, 5, 6),
+    6: (-1,) * 16 + (1,) * 5 + (2,) * 4 + (4,) * 3 + (5,) * 2 + (6,) * 2,
+    7: (-1,) * 32 + (1,) * 10 + (2,) * 8 + (4,) * 6 + (5,) * 4 + (6,) * 4,
+}
+WVSM_BLOCK_BYTES = 0x1000
+SOUND_MAX_RATE = 384000
+WAV_HEADER = 44
+
+
+def _vima_delta_table():
+    """89 x 64: entry j*64 + i = the sum, over the bits of i from 0x20 down, of STEP[j] >> 0..5."""
+    t = [0] * (89 * 64)
+    for i in range(64):
+        for j in range(89):
+            s, acc, m = VIMA_STEP[j], 0, 0x20
+            while m:
+                if i & m:
+                    acc += s
+                m >>= 1
+                s >>= 1
+            t[j * 64 + i] = acc & 0xFFFF
+    return t
+
+
+VIMA_DELTA = _vima_delta_table()
+
+
+def vima_delta(index, magnitude):
+    """The amount a non-escape code adds or subtracts."""
+    w = VIMA_WIDTH[index]
+    d = VIMA_DELTA[(index << 6) | (magnitude << (7 - w))]
+    return d + (VIMA_STEP[index] >> (w - 1) if magnitude else 0)
+
+
+def vima_next_index(index, magnitude):
+    n = index + VIMA_ADJUST[VIMA_WIDTH[index]][magnitude]
+    return 0 if n <= 0 else (88 if n >= 88 else n)
+
+
+def _s16(v):
+    v &= 0xFFFF
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def vima_header_predictor(b0, b1, quirk):
+    """The voice decoder reads (b0 << 8) | (signed char)b1 (quirk); the music decoder a plain BE16."""
+    v = (b0 << 8) | b1
+    if quirk and b1 >= 0x80:
+        v |= 0xFF00
+    return _s16(v)
+
+
+class SoundError(ValueError):
+    """A file the tool must refuse, with the file offset its error line names."""
+
+    def __init__(self, offset, message):
+        ValueError.__init__(self, '@0x%X: %s' % (offset, message))
+        self.offset = offset
+
+
+def _need(data, pos, n, base, what='data'):
+    if pos + n > len(data):
+        raise SoundError(base + pos, 'unexpected end of data reading %s' % what)
+
+
+def vima_read_header(data, pos, base, quirk):
+    """The stream header at data[pos:] (data ends where the stream ends): ({channels, index,
+    pred, wvsm, size, offset}, next position). Mirrors vima_read_header: a failed read at its
+    position, a step index outside 0..88 (unless WVSM) at its byte."""
+    start = pos
+    _need(data, pos, 1, base, 'u8')
+    b = data[pos]
+    ch = 2 if b & 0x80 else 1
+    idx = [(~b) & 0xFF if ch == 2 else b, 0]
+    _need(data, pos + 1, 1, base, 'u8')
+    _need(data, pos + 2, 1, base, 'u8')
+    pred = [vima_header_predictor(data[pos + 1], data[pos + 2], quirk), 0]
+    pos += 3
+    wvsm = False
+    if ch == 2:
+        for k in range(3):
+            _need(data, pos + k, 1, base, 'u8')
+        raw1 = data[pos]
+        idx[1] = raw1 - 256 if raw1 & 0x80 else raw1
+        pred[1] = vima_header_predictor(data[pos + 1], data[pos + 2], quirk)
+        pos += 3
+        if pred[0] == 0x1111 and raw1 == 0x64 and pred[1] == 0x2222 and data[pos:pos + 4] == b'WVSM':
+            pos += 4
+            wvsm = True
+    if not wvsm:
+        for c in range(ch):
+            if not 0 <= idx[c] <= 88:
+                raise SoundError(base + (start if c == 0 else start + 3), 'step index %d of channel %d' % (idx[c], c))
+    return {'channels': ch, 'index': idx, 'pred': pred, 'wvsm': wvsm, 'size': pos - start, 'offset': base + start}, pos
+
+
+def vima_frames(h, pcm_bytes):
+    return pcm_bytes // (2 * h['channels'])
+
+
+def vima_requested(h, pcm_bytes):
+    return pcm_bytes // 2 if h['wvsm'] else vima_frames(h, pcm_bytes) * h['channels']
+
+
+def vima_room(h, coded):
+    return coded if h['wvsm'] else 2 * coded
+
+
+def vima_decode_body(data, pos, base, h, pcm_bytes, stats=None):
+    """The codes in data[pos:] (to the end of `data`): whole frames of interleaved samples. Bytes
+    past the end read as zero; codes that need more bits than the data has are refused at the end
+    of the data. WVSM streams decode in 0x1000-byte blocks of byte codes."""
+    end = len(data)
+    avail = end - pos
+    frames = vima_frames(h, pcm_bytes)
+    nch = h['channels']
+    if stats is None:
+        stats = {}
+    if h['wvsm']:
+        keep = frames * 2
+        out = [0] * keep
+        p = pos
+
+        def byte():
+            nonlocal p
+            if p >= end:
+                raise SoundError(base + end, 'the WVSM data ends before the samples asked for')
+            p += 1
+            return data[p - 1]
+        left, block = pcm_bytes, 0
+        while left:
+            n = min(left, WVSM_BLOCK_BYTES)
+            left -= n
+            half = (n & ~1) >> 1
+            byte()
+            byte()
+            sh = byte()
+            shifts = (sh >> 4, sh & 15)
+            o = block
+            i = 0
+            while i < half:
+                for s in range(2):
+                    c = byte()
+                    if c == 0x80:
+                        v = _s16((byte() << 8) + byte())
+                    else:
+                        v = _s16((c - 256 if c & 0x80 else c) * (1 << shifts[s]))
+                    if o < keep:
+                        out[o] = v
+                    o += 1
+                i += 2
+            block += WVSM_BLOCK_BYTES // 2
+        stats['coded_bytes'] = p - pos
+        return out, p
+    out = [0] * (frames * nch)
+    state = {'p': pos, 'win': 0, 'used': 0}
+
+    def byte():
+        b = data[state['p']] if state['p'] < end else 0
+        state['p'] += 1
+        return b
+    win = (byte() << 8) | byte()
+    used = 0
+    bits = 0
+    short = None
+    escapes = clamps = 0
+    count = 0
+    for c in range(nch):
+        idx, prd = h['index'][c], h['pred'][c]
+        o = c
+        for k in range(frames):
+            w = VIMA_WIDTH[idx]
+            sign = 1 << (w - 1)
+            mask = sign - 1
+            used += w
+            code = (win >> (16 - used)) & (sign | mask)
+            bits += w
+            if used > 7:
+                used -= 8
+                win = ((win << 8) | byte()) & 0xFFFF
+            mag = code & mask
+            if mag == mask:
+                hi = (win << used) & 0xFF00
+                win = ((win << 8) | byte()) & 0xFFFF
+                lo = (win >> (8 - used)) & 0xFF
+                win = ((win << 8) | byte()) & 0xFFFF
+                prd = _s16(hi | lo)
+                bits += 16
+                escapes += 1
+            else:
+                d = vima_delta(idx, mag)
+                if code & sign:
+                    prd -= d
+                    if prd < -32768:
+                        prd, clamps = -32768, clamps + 1
+                else:
+                    prd += d
+                    if prd > 32767:
+                        prd, clamps = 32767, clamps + 1
+            idx = vima_next_index(idx, mag)
+            if short is None and bits > 8 * avail:
+                short = (k, c)
+            out[o] = prd
+            o += nch
+            count += 1
+    stats.update(escapes=escapes, clamps=clamps, code_bits=bits, coded_bytes=(bits + 7) // 8)
+    if short is not None:
+        raise SoundError(base + end, 'the coded data ends inside sample %d of %d (channel %d)' % (short[0], frames,
+                                                                                               short[1]))
+    return out, pos + (bits + 7) // 8
+
+
+# ---------------------------------------------------------------------------- the test encoder
+
+
+def vima_encode_channel(bw, samples, index, pred, escape_at=(), rng=None, trace=None):
+    """Appends the codes of one channel to the MSB-first bit writer `bw`, starting from the decoder
+    state (index, pred); returns (the samples the decoder will produce, final index, final pred).
+    A sample whose distance from the prediction exceeds the largest delta is escaped (as the game's
+    encoder did); `escape_at` forces escapes. Clamping is allowed: the code whose clamped result
+    is nearest wins. `trace` gets the bit count after each sample."""
+    out = []
+    for k, x in enumerate(samples):
+        w = VIMA_WIDTH[index]
+        sign = 1 << (w - 1)
+        mask = sign - 1
+        maxd = vima_delta(index, mask - 1)
+        if k in escape_at or abs(x - pred) > maxd:
+            s = (rng.below(2) if rng else 0) << (w - 1)      # the escape's sign bit is not used
+            bw.bits(s | mask, w)
+            bw.bits(x & 0xFFFF, 16)
+            pred = _s16(x)
+            index = vima_next_index(index, mask)
+        else:
+            best = None
+            for m in range(mask):
+                d = vima_delta(index, m)
+                for neg in (0, 1):
+                    v = max(-32768, pred - d) if neg else min(32767, pred + d)
+                    e = abs(v - x)
+                    if best is None or e < best[0]:
+                        best = (e, m, neg, v)
+            _, m, neg, v = best
+            bw.bits((sign if neg else 0) | m, w)
+            pred = v
+            index = vima_next_index(index, m)
+        out.append(pred)
+        if trace is not None:
+            trace.append(bw.bit_length())
+    return out, index, pred
+
+
+def vima_header_bytes(index, pred_bytes, channels):
+    """A stream header: index per channel, the two predictor bytes per channel."""
+    if channels == 1:
+        return bytes([index[0], pred_bytes[0][0], pred_bytes[0][1]])
+    return bytes([(~index[0]) & 0xFF, pred_bytes[0][0], pred_bytes[0][1], index[1] & 0xFF, pred_bytes[1][0],
+                  pred_bytes[1][1]])
+
+
+def vima_encode(channels, quirk, index=(0, 0), pred_bytes=((0, 0), (0, 0)), escape_at=(), seed=1, trace=None):
+    """One VIMA stream (header + codes) for 1 or 2 channels of equal length. Returns (bytes,
+    interleaved samples the decoder produces, final (index, pred) per channel, code bits)."""
+    rng = Lcg(seed)
+    nch = len(channels)
+    head = vima_header_bytes(index, pred_bytes, nch)
+    bw = BitWriterMSB()
+    rec, final = [], []
+    for c in range(nch):
+        p0 = vima_header_predictor(pred_bytes[c][0], pred_bytes[c][1], quirk)
+        r, i, p = vima_encode_channel(bw, channels[c], index[c], p0, escape_at if c == 0 else (), rng,
+                                      trace if c == 0 else None)
+        rec.append(r)
+        final.append((i, p))
+    inter = [rec[c][k] for k in range(len(channels[0])) for c in range(nch)]
+    return head + bw.getvalue(), inter, final, bw.bit_length()
+
+
+def wvsm_encode(samples, pcm_bytes, shifts=((3, 2),), seed=7):
+    """A WVSM stream: the stereo signature header, then blocks of 0x1000 output bytes (a u16, a
+    shift byte, a byte per sample or 0x80 and a big-endian sample). `samples` are interleaved
+    stereo; the decoder reads 2 * ceil(half / 2) samples per block, even ones with the high shift,
+    odd ones with the low one. A sample is coded as a byte (x >> shift, kept in -127..127, so lossy)
+    or, one time in four, escaped. Returns (bytes, the samples the decoder produces)."""
+    rng = Lcg(seed)
+    out = bytearray(b'\xFF\x11\x11\x64\x22\x22WVSM')
+    dec = []
+    left, block, b = pcm_bytes, 0, 0
+    while left:
+        n = min(left, WVSM_BLOCK_BYTES)
+        left -= n
+        half = (n & ~1) >> 1
+        sa, sb = shifts[b % len(shifts)]
+        out += struct.pack('<H', n)
+        out.append((sa << 4) | sb)
+        for i in range(2 * ((half + 1) // 2)):
+            k = block + i
+            x = samples[k] if k < len(samples) else 0
+            sh = sa if i % 2 == 0 else sb
+            if rng.below(4):
+                q = max(-127, min(127, x >> sh))
+                out.append(q & 0xFF)
+                dec.append(_s16(q * (1 << sh)))
+            else:
+                out.append(0x80)
+                out += struct.pack('>H', x & 0xFFFF)
+                dec.append(_s16(x))
+        block += WVSM_BLOCK_BYTES // 2
+        b += 1
+    return bytes(out), dec
+
+
+# ---------------------------------------------------------------------------- generated signals
+
+
+def sig_sine(n, period, amp, phase=0.0):
+    return [int(round(amp * math.sin(2 * math.pi * (k + phase) / period))) for k in range(n)]
+
+
+def sig_chirp(n, f0, f1, amp, rate=22050.0):
+    out, ph = [], 0.0
+    for k in range(n):
+        f = f0 + (f1 - f0) * k / max(1, n - 1)
+        ph += 2 * math.pi * f / rate
+        out.append(int(round(amp * math.sin(ph))))
+    return out
+
+
+def sig_noise(n, seed, amp=32767):
+    rng = Lcg(seed)
+    return [rng.below(2 * amp + 1) - amp for _ in range(n)]
+
+
+def sig_square(n, period, amp=32767):
+    return [amp if (k // (period // 2)) % 2 == 0 else -amp - 1 for k in range(n)]
+
+
+def sig_mix(*parts):
+    """Concatenation of signal parts."""
+    out = []
+    for p in parts:
+        out += p
+    return out
+
+
+# ---------------------------------------------------------------------------- voice files (INDYWV)
+
+
+def make_wv(stream, pcm_bytes, rate=22050, channels=1, bits=16, sync=b'', data_size=None, trailing=b''):
+    """An INDYWV file: header, sync block, PCM byte count, VIMA stream (+ trailing bytes). The data
+    size counts the count word and the stream (and trailing bytes) unless given."""
+    body = struct.pack('<I', pcm_bytes) + stream + trailing
+    if data_size is None:
+        data_size = len(body)
+    return b'INDYWV' + struct.pack('<5I', rate, bits, channels, data_size, len(sync)) + sync + body
+
+
+def wv_model(data, base=0):
+    """The voice reader (wv_decode): {'rate', 'channels', 'samples', 'warnings': [(offset, kind)]}
+    or SoundError. Warning kinds: 'datasize', 'frames'."""
+    n = len(data)
+    if n < 6 or data[:6] != b'INDYWV':
+        raise SoundError(base, 'not an INDYWV voice file')
+    vals = []
+    for off in (6, 0xA, 0xE, 0x12, 0x16):
+        _need(data, off, 4, base, 'u32')
+        vals.append(struct.unpack_from('<I', data, off)[0])
+    rate, bits, ch, dsize, sync = vals
+    if rate == 0 or rate > SOUND_MAX_RATE:
+        raise SoundError(base + 6, 'sample rate')
+    if bits != 16:
+        raise SoundError(base + 0xA, 'bits')
+    if ch not in (1, 2):
+        raise SoundError(base + 0xE, 'channels')
+    if sync > n - 0x1A:
+        raise SoundError(base + 0x16, 'sync block')
+    count_at = 0x1A + sync
+    _need(data, count_at, 4, base, 'u32')
+    pcm = struct.unpack_from('<I', data, count_at)[0]
+    warnings = []
+    if 0x1A + sync + dsize != n:
+        warnings.append((base + 0x12, 'datasize'))
+    h, pos = vima_read_header(data, count_at + 4, base, quirk=True)
+    if h['channels'] != ch:
+        raise SoundError(h['offset'], 'channel count of the stream')
+    if pcm % (2 * ch):
+        warnings.append((base + count_at, 'frames'))
+    if vima_requested(h, pcm) > vima_room(h, n - pos):
+        raise SoundError(base + count_at, 'the PCM size asks for more samples than the codes hold')
+    samples, _ = vima_decode_body(data, pos, base, h, pcm)
+    return {'rate': rate, 'channels': ch, 'samples': samples, 'warnings': warnings, 'wvsm': h['wvsm']}
+
+
+def wav_bytes(rate, channels, samples):
+    """The canonical 44-byte-header 16-bit PCM WAV the tool writes."""
+    data = struct.pack('<%dh' % len(samples), *samples)
+    return (b'RIFF' + struct.pack('<I', len(data) + 36) + b'WAVE' + b'fmt ' +
+            struct.pack('<IHHIIHH', 16, 1, channels, rate, rate * channels * 2, channels * 2, 16) + b'data' +
+            struct.pack('<I', len(data)) + data)
+
+
+def wv_expected(data):
+    """The WAV the tool writes for a voice file, or SoundError."""
+    m = wv_model(data)
+    return wav_bytes(m['rate'], m['channels'], m['samples'])
+
+
+def _voice(name, signal, **kw):
+    """A voice fixture: (name, file bytes, the samples the encoder meant (for the self-test))."""
+    quirk_bytes = kw.pop('pred_bytes', ((0, 0), (0, 0)))
+    index = kw.pop('index', (0, 0))
+    escape_at = kw.pop('escape_at', ())
+    pcm = kw.pop('pcm_bytes', None)
+    chans = signal if signal and isinstance(signal[0], list) else [signal]
+    stream, rec, _, _ = vima_encode(chans, True, index, quirk_bytes, escape_at)
+    if pcm is None:
+        pcm = 2 * len(rec)
+    return (name, make_wv(stream, pcm, channels=len(chans), **kw), rec)
+
+
+def voice_fixtures():
+    """[(name, bytes, samples the encoder meant)]: mono and stereo ADPCM, WVSM, every header edge."""
+    fx = [
+        _voice('sine.wv', sig_sine(1000, 50.0, 8000)),
+        _voice('chirp.wv', sig_chirp(3001, 100.0, 9000.0, 20000)),
+        _voice('silence.wv', [0] * 500),
+        _voice('noise.wv', sig_noise(2000, 11), rate=11025),
+        _voice('clip.wv', sig_square(1200, 40)),
+        _voice('hot.wv', [max(-32768, min(32767, x)) for x in sig_sine(1500, 90.0, 60000)]),
+        _voice('stereo.wv', [sig_sine(900, 37.0, 12000), sig_chirp(900, 300.0, 5000.0, 16000)]),
+        _voice('quirk.wv', sig_sine(700, 23.0, 3000), pred_bytes=((0x12, 0x9A), (0, 0)), index=(30, 0)),
+        _voice('idx88.wv', sig_noise(300, 5, 9000), index=(88, 0)),
+        _voice('escfirst.wv', sig_sine(200, 19.0, 20000, 3.0), escape_at=(0, 1, 2, 199)),
+        _voice('one.wv', [1234]),
+        _voice('zero.wv', [], pcm_bytes=0),
+        _voice('oddpcm.wv', sig_sine(1000, 61.0, 7000), pcm_bytes=2001),
+        _voice('sync.wv', sig_chirp(600, 50.0, 2000.0, 9000), sync=struct.pack('<III', 7, 1, 0x55AA55AA)),
+        _voice('datasize.wv', sig_sine(400, 33.0, 6000), data_size=17),
+        _voice('trailing.wv', sig_sine(400, 33.0, 6000), trailing=b'\x5A' * 9),
+        _voice('rate8k.wv', sig_sine(800, 16.0, 10000), rate=8000),
+    ]
+    # a stream whose code bits end on a byte boundary (the decoder then looks two bytes ahead);
+    # the encoder is causal, so a prefix of the signal codes as a prefix of the bits
+    base = sig_mix(sig_sine(500, 29.0, 9000), sig_noise(200, 3, 3000))
+    trace = []
+    vima_encode([base], True, trace=trace)
+    n = max(k + 1 for k, bits in enumerate(trace) if bits % 8 == 0)
+    fx.append(_voice('edge.wv', base[:n]))
+    # WVSM: two whole blocks, and a block of an odd sample count with a PCM size of part frames
+    stereo = [x for pair in zip(sig_sine(2048, 64.0, 900), sig_chirp(2048, 50.0, 4000.0, 30000))
+              for x in pair]
+    for name, pcm in (('wvsm.wv', 0x2000), ('wvsmodd.wv', 0x1006)):
+        st, dec = wvsm_encode(stereo, pcm, shifts=((3, 0), (0, 7)))
+        frames = pcm // 4
+        fx.append((name, make_wv(st, pcm, channels=2), dec[:frames * 2]))
+    return fx
+
+
+def voice_mutants():
+    """Damaged copies of voice fixtures: [(name, bytes)]; the model gives each one's outcome."""
+    fx = {n: d for n, d, _ in voice_fixtures()}
+    sine, stereo, wvsm = fx['sine.wv'], fx['stereo.wv'], fx['wvsm.wv']
+    out = [('wv_' + k, d) for k, d in _cuts(sine, [0, 5, 6, 0xB, 0x19, 0x1C, 0x1E, 0x1F, 0x20, len(sine) // 2,
+                                                   len(sine) - 1])]
+    out += [('wv_st_' + k, d) for k, d in _cuts(stereo, [0x21, 0x23, len(stereo) - 2])]
+    out += [('wv_wvsm_' + k, d) for k, d in _cuts(wvsm, [0x2A, len(wvsm) - 1])]
+    out += [('wv_%s' % k, _put32(sine, off, v)) for k, off, v in
+            [('rate0', 6, 0), ('ratebig', 6, 400000), ('bits8', 0xA, 8), ('chan3', 0xE, 3), ('chan2', 0xE, 2),
+             ('synchuge', 0x16, HUGE), ('pcmhuge', 0x1A, HUGE), ('pcmmore', 0x1A, len(sine) * 3)]]
+    magic = bytearray(sine)
+    magic[3] = ord('X')
+    out.append(('wv_magic', bytes(magic)))
+    idx = bytearray(sine)
+    idx[0x1E] = 89                                        # step index 89
+    out.append(('wv_index89', bytes(idx)))
+    st = bytearray(stereo)
+    st[0x21] = 0x80                                       # channel 1's step index -128
+    out.append(('wv_st_index1', bytes(st)))
+    mono = bytearray(stereo)
+    struct.pack_into('<I', mono, 0xE, 1)                  # a stereo stream in a mono file
+    out.append(('wv_st_mono', bytes(mono)))
+    return out
+
+
+def sound_stem(file_name):
+    """A sound file's name without its extension (from the last '.')."""
+    return file_name.rsplit('.', 1)[0] if '.' in file_name else file_name
+
+
 # ============================================================================ LAB contents and the synthetic disc
 
 def _bmp_sample(w, h, seed):
@@ -2586,7 +3102,20 @@ def localize_lab_entries():
 
 
 def voice_lab_entries():
-    return [('line1.wv', 'WVSM', bytes(range(32))), ('line2.wv', 'WVSM', bytes(range(64, 80)))]
+    """VOICE.LAB: synthetic voice files (type BSND, as the game's), in both letter cases."""
+    fx = {n: d for n, d, _ in voice_fixtures()}
+    return [('LINE1.WV', 'BSND', fx['sine.wv']), ('line2.wv', 'BSND', fx['stereo.wv']),
+            ('Line3.Wv', 'BSND', fx['wvsm.wv'])]
+
+
+def sound_lab_entries():
+    """A LAB with voice files among other entries: a damaged voice file, a voice file whose WAV
+    name the archive also uses, and a name that only looks like a voice file."""
+    fx = {n: d for n, d, _ in voice_fixtures()}
+    return [('first.wv', 'BSND', fx['chirp.wv']), ('notes.txt', 'TEXT', b'not a voice file\r\n'),
+            ('broken.wv', 'BSND', fx['noise.wv'][:300]), ('clash.wv', 'BSND', fx['one.wv']),
+            ('clash.wav', 'WAVE', b'RIFF0000WAVE'), ('Second.WV', 'BSND', fx['quirk.wv']),
+            ('looks.wvx', 'BSND', fx['sine.wv'])]
 
 
 def write_file(path, data):
@@ -2986,6 +3515,32 @@ def self_test():
     for gen in (lab_mutants, level_mutants, z_mutants):
         names = [n for n, _ in gen()]
         check(len(names) == len(set(names)) and len(names) > 10, '%s: distinct names' % gen.__name__)
+    # sound: the model decodes what the test encoder meant, and gives the documented warnings
+    warn_kinds = {'oddpcm.wv': ['frames'], 'datasize.wv': ['datasize'], 'wvsmodd.wv': ['frames']}
+    totals = {'escapes': 0, 'clamps': 0}
+    for name, data, rec in voice_fixtures():
+        m = wv_model(data)
+        check(m['samples'] == rec, 'voice %s: the model does not decode what the encoder meant' % name)
+        check([k for _, k in m['warnings']] == warn_kinds.get(name, []), 'voice %s: warnings %r' % (name, m['warnings']))
+        check(len(wv_expected(data)) == WAV_HEADER + 2 * len(rec), 'voice %s: WAV size' % name)
+        if not m['wvsm']:
+            st = {}
+            h, pos = vima_read_header(data, 0x1E + struct.unpack_from('<I', data, 0x16)[0], 0, True)
+            vima_decode_body(data, pos, 0, h, struct.unpack_from('<I', data, pos - h['size'] - 4)[0], st)
+            for k in totals:
+                totals[k] += st.get(k, 0)
+    check(totals['escapes'] > 100 and totals['clamps'] > 10, 'voice fixtures exercise escapes and clamps %r' % totals)
+    for gen, model in ((voice_mutants, lambda d: wv_model(d)),):
+        refused = 0
+        names = []
+        for n, d in gen():
+            names.append(n)
+            try:
+                model(d)
+            except SoundError:
+                refused += 1
+        check(len(names) == len(set(names)) and refused >= len(names) - 3,
+              '%s: %d of %d refused, distinct names' % (gen.__name__, refused, len(names)))
     for p in problems:
         print('self-test FAIL:', p)
     print('self-test: %d problem(s)' % len(problems))
@@ -3052,6 +3607,13 @@ def write_fuzz_corpus(root):
     for name, data in z_mutants():
         put('z', 'damaged_' + name, data)
 
+    for name, data, _ in voice_fixtures():
+        put('wv', name, data)
+    for name, data in voice_mutants():
+        put('wv', 'damaged_' + name, data)
+    put('lab_file', 'voice', make_lab(voice_lab_entries()))   # default mode decodes the voice files
+    put('lab_file', 'voice_mixed', make_lab(sound_lab_entries()))
+
 
 def write_all(outdir):
     disc = os.path.join(outdir, 'disc')
@@ -3083,6 +3645,12 @@ def write_all(outdir):
     write_file(os.path.join(outdir, 'hostile', 'names.baf'), build_baf(unsafe_name_baf())[0])
     write_file(os.path.join(outdir, 'hostile', 'names.lab'), unsafe_name_lab())
     write_file(os.path.join(outdir, 'hostile', 'names.z'), unsafe_name_z())
+    for name, data, _ in voice_fixtures():
+        write_file(os.path.join(loose, 'wv', name), data)
+    write_file(os.path.join(loose, 'lab', 'voice.lab'), make_lab(sound_lab_entries()))
+    for sub, gen in (('wv', voice_mutants),):
+        for mname, data in gen():
+            write_file(os.path.join(outdir, 'damaged', sub, mname), data)
     return 0
 
 

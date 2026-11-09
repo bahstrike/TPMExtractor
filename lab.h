@@ -2,7 +2,7 @@
 // Bad Ass Hackers 2021-2024
 // Modified 2026 in the TPMExtractor fork (see CHANGES.md): new entry point signature with Options;
 // public bounds-checked LAB directory parser (stored or sequential layout) and a
-// case-insensitive entry lookup.
+// case-insensitive entry lookup; voice files decoded to WAV during extraction (--sound).
 
 #pragma once
 
@@ -88,7 +88,12 @@ int find_lab_entry(const LabDirectory& dir, const std::string& name);
 // loaded whole. Default mode reads the stored offsets; --legacy reads sequentially, as the
 // original did (identical on the retail disc; a warning says when they differ).
 // An entry that cannot be extracted is reported with file and offset and skipped; a malformed
-// directory stops the archive. Returns true only if every entry was written.
+// directory stops the archive.
+// With opts.sound Wav (default mode; --legacy pins None) every entry named "*.wv" (any case) is
+// also decoded as a voice file (sound.h) to <name without extension>.wav next to it, unless the
+// archive has an entry of that name itself (a warning). A voice file that cannot be decoded is an
+// error with the archive's file offset; its raw copy stays.
+// Returns true only if every entry was written (and every voice file decoded).
 bool extract_lab(const std::string& lab_path, const std::string& out_dir, const Options& opts);
 
 } // namespace tpmx
