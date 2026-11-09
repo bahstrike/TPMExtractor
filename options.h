@@ -103,9 +103,10 @@ enum class GeometryTextureRule {
 
 // Sound decoding (sound.h).
 enum class SoundMode {
-    None,  // archives give their voice files as they are stored. --legacy.
+    None,  // archives give their voice files as they are stored; no music is decoded. --legacy.
     Wav,   // also each voice file of a LAB (lab, the disc run's VOICE.LAB) decoded to <name>.wav
-           // next to it. Default.
+           // next to it, and the disc's music folder (MUSIC or GAMEDATA/MUSIC) decoded into
+           // <dump>/music/. Default.
 };
 
 struct Options
@@ -125,7 +126,7 @@ struct Options
     bool debug_dumps = true;          // write *.3do.txt, *.key.txt and REMAIN.HEX
     GeometryMode geometry = GeometryMode::Obj;  // level geometry. --legacy: None
     GeometryTextureRule geometry_texture_rule = GeometryTextureRule::Game;
-    SoundMode sound = SoundMode::Wav; // decode voice files. --legacy: None
+    SoundMode sound = SoundMode::Wav; // decode voice files and music. --legacy: None
     bool keep_decompressed = false;   // keep big.lab and LEVEL/<L>/<L>.dec
     bool pause = false;               // wait for a key before exiting
     int verbose = 0;                  // -1 quiet, 0 normal, 1 verbose, 2 debug

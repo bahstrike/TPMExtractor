@@ -34,8 +34,8 @@ fork" notice near the top; new files say so in their header.
 ### Command line
 
 - Commands `all`, `z`, `lab`, `b3d`, `b3dall`, `baf`, `bafall` (`tpmextractor DiscDir DumpDir` is
-  `all`), and the sound command `wv` (see Sound), which `--legacy` refuses. Each command's
-  `OUTDIR` is created with its parents. `b3d` and `baf` name their output
+  `all`), and the sound commands `wv`, `imc`, `music` and `imuse` (see Sound), which `--legacy`
+  refuses. Each command's `OUTDIR` is created with its parents. `b3d` and `baf` name their output
   folder after the file name as typed (up to its first `.`), in the case typed; `b3dall` names
   level folders in upper case, as the disc run does; `bafall` keeps each file's case.
 - Exit status: 0 success (warnings allowed), 1 some files could not be processed, 2 usage error or
@@ -70,7 +70,7 @@ behaviour and refuses it on the command line):
 | `--[no-]debug-dumps` | on | `*.3do.txt`, `*.key.txt`, `REMAIN.HEX` |
 | `--geometry obj\|none` | obj | each level's geometry as `<NAME>.obj` and `<NAME>.mtl` next to its textures (see Levels) |
 | `--geometry-texture-rule game\|mat` | game | the texture of each OBJ face: `game` the one the game draws the polygon with, `mat` always its UV mapping's |
-| `--sound wav\|none` | wav | decode each voice file of a LAB (`lab`, the disc run's `VOICE.LAB`) to `<file>.wav` next to it (see Sound) |
+| `--sound wav\|none` | wav | decode each voice file of a LAB (`lab`, the disc run's `VOICE.LAB`) to `<file>.wav` next to it, and the disc's music folder into `music/` (see Sound) |
 | `--keep-decompressed` | off | keep `big.lab` and `LEVEL/<NAME>/<NAME>.dec` |
 | `--[no-]pause` | off | wait for a key before exiting |
 | `-v`, `-vv`, `-q` | | verbose, debug, quiet |
@@ -267,18 +267,38 @@ behaviour and refuses it on the command line):
   channel count of the file's header. In default mode `lab` and the disc run write `<file>.wav` next
   to each `<file>.wv` entry (any case; not when the archive has an entry of that name itself, a
   warning); `wv FILE.WV OUTDIR` decodes one file. The original wrote the coded files only.
-- **The codec**: the voice files code their samples with VIMA ADPCM (4- to 7-bit codes by step
-  index, escapes to raw 16-bit samples, the IMA step table), read as the game's voice decoder reads
-  it, a stream header's predictor included; the WVSM block codec that decoder also selects is
-  followed too (no retail file uses it). Decoding is checked on the whole retail corpus: the PCM of
-  all 2,624 voice files equals an independent decoder's (a SHA-256 manifest kept outside the
-  repository).
+- **Music** (`*.IMC`, "MCMP"): `imc FILE.IMC OUTDIR` writes the exact decoded audio as
+  `<file>.wav` at the rate and channel count of the track's format event, and the track's map as
+  `<file>.imap.txt`: its FRMT, TEXT (markers such as the loop point and `_end`), REGN, JUMP (with
+  hook and crossfade), STOP and SYNC events, with positions as frames of the WAV. `music DIR OUTDIR`
+  does every `*.IMC` of a folder (any case). The disc run decodes the disc's (or installation's)
+  `MUSIC` or `GAMEDATA/MUSIC` folder, any case, the first found, into `<dump>/music/` (only when
+  there is one, so the dump of a disc without music is unchanged).
+- **Music tables** (`imuse IMUSE.DLL OUTDIR`): the game's state, sequence and file tables (which
+  music id plays which file) as `imuse_tables.txt`. The DLL is read as data: its PE headers and
+  sections, then the tables found by their structure (the null state and null sequence records,
+  76-byte records, the file table ending at the first empty key); the record counts must be the
+  retail DLL's (87, 82, 167). Each record's file is resolved the way the engine does it, byte for
+  byte; on a retail DLL one record's key matches its file's key only ignoring case, and resolves to
+  none.
+- **The codec**: both formats code their samples with VIMA ADPCM (4- to 7-bit codes by step index,
+  escapes to raw 16-bit samples, the IMA step table). The voice and music decoders of the game
+  differ only in how a stream header's predictor is read; both are followed, as is the WVSM block
+  codec the voice decoder also selects (no retail file uses it). Decoding is checked on the whole
+  retail corpus: the PCM of all 2,624 voice files and all 168 music files equals an independent
+  decoder's (SHA-256 manifests kept outside the repository).
 - **Checks** (each failure an error with file and offset; nothing is written for that file): the
-  header fields (16 bits, 1 or 2 channels, the stream's channel count), the sync block and the
-  codes inside the file (the decoder looks up to two bytes ahead, which it never uses); a data size
-  the game does not use that disagrees with the file, and a PCM size of part frames, are warnings.
-  Files larger than 32 MiB are refused.
-- `--legacy` never decodes and refuses `--sound` and the `wv` command, so its output is unchanged.
+  block sizes add up to the file; raw blocks are stored as they are, come first and hold exactly the
+  iMUS header; the decoded audio is exactly the DATA size, in whole frames; every block has the
+  format event's channel count; map events lie inside the audio, on whole frames, in order; regions
+  end inside the audio; every JUMP lands where a region starts and, when the map names a loop point
+  (`lp`), on it; every block's codes fit in its stored bytes (the decoders look up to two bytes
+  ahead, which they never use). Voice files: the header fields (16 bits, 1 or 2 channels, the
+  stream's channel count), the sync block and the codes inside the file; a data size the game does
+  not use that disagrees with the file, and a PCM size of part frames, are warnings. Files larger
+  than 32 MiB, and DLLs larger than 64 MiB, are refused.
+- `--legacy` never decodes and refuses `--sound` and the sound commands, so its output is
+  unchanged.
 
 ### Robustness
 
@@ -331,23 +351,26 @@ behaviour and refuses it on the command line):
   checked as above and against `--legacy`, and (with `TPM_REF_MANIFEST`, a manifest of the
   original's output with the uninitialised tail lines masked) the `--legacy` identity test. Dumps
   go outside the source tree and are deleted.
-- Sound: `make_fixtures.py` holds an independent model of the voice reader (ported from the
-  reference decoder of the format research, with every check and error offset), a VIMA test
-  encoder, and synthetic voice files made from generated signals (sines, chirps, silence, noise,
-  full-scale squares; mono and stereo, WVSM, the voice decoder's predictor quirk, escapes and
-  clamping, part frames, codes that end on a byte boundary). The model agrees with the real
-  corpus's manifest and, where it can read the streams, with FFmpeg's decoder. The runner checks
-  `wv`, `lab` and the disc run against the model byte for byte, `--sound none` and `--legacy`, and
-  28 damaged copies, each refused at the model's offset with nothing written. With
-  `TPM_VOICE_LAB` (and the manifest `TPM_WV_MANIFEST`) a real-data test decodes your copy's every
-  voice file and compares every PCM hash.
+- Sound: `make_fixtures.py` holds an independent model of the three sound readers (ported from
+  the reference decoders of the format research, with every check and error offset), a VIMA test
+  encoder, and synthetic voice files, music files and music-table DLLs made from generated signals
+  (sines, chirps, silence, noise, full-scale squares; mono and stereo, WVSM, the voice decoder's
+  predictor quirk, escapes and clamping, part frames, one-frame blocks, codes that end on a byte
+  boundary, raw headers in two blocks). The model agrees with the real corpus's manifests and,
+  where it can read the streams, with FFmpeg's decoder. The runner checks `wv`, `imc`, `music`,
+  `imuse`, `lab` and the disc run against the model byte for byte, `--sound none` and `--legacy`,
+  and about a hundred damaged copies, each refused at the model's offset with nothing written.
+  With `TPM_VOICE_LAB`, `TPM_MUSIC_DIR` and `TPM_IMUSE_DLL` (and the manifests `TPM_WV_MANIFEST`,
+  `TPM_IMC_MANIFEST`) real-data tests decode your copy's every voice file and track and compare
+  every PCM hash.
 - Unit tests: `unit_layer` (platform, BMP, reader, options), `unit_textout` (number formatting),
   `unit_jkout` (MAT and CMP encoders), `unit_b3d_decompress` (the level decoder), `unit_b3d_geom`
   (the geometry decoder and OBJ/MTL writer: number format, UV corner tables, normals and winding,
   texture rules, LINK checks, error offsets of damaged levels, OBJ/MTL file names), `unit_sound`
   (the VIMA tables against closed forms, the bit reader and decoder on hand-coded streams: escapes,
   the rounding term, clamping, channel order, the two header predictors, WVSM, read-ahead at the
-  end of the data; error offsets, WAV header bytes, output names).
+  end of the data; error offsets, WAV header bytes, output names, music files of raw blocks only
+  and with a hand-coded VIMA block, the music-table text).
 - Level geometry: `make_fixtures.py` builds the specification's synthetic test vector (14 abstract
   polygons on a 5 x 3 grid with generated palettes and pixels, covering every UV mode, both
   texture rules, LINK entries, moving and hidden polygons and the special cases), pinned by
@@ -360,8 +383,9 @@ behaviour and refuses it on the command line):
   byte, and the disc run with `b3dall`.
 - Fuzz targets `tests/fuzz_*.cpp` with libFuzzer (clang) or a replay driver (`-DTPMX_FUZZ=ON`):
   in memory the LAB directory, the B3D section walk and LZSS decoder, the level geometry decoder
-  with its OBJ text (`fuzz_b3d_geom`), CMPs and voice files (`fuzz_wv`); and through the tool's
-  file entry points, BAF files (`fuzz_baf`: both parsers and every BAF writer, in
+  with its OBJ text (`fuzz_b3d_geom`), CMPs, voice files (`fuzz_wv`), music files with their map
+  text (`fuzz_imc`) and the music tables (`fuzz_imuse`); and through the tool's file entry
+  points, BAF files (`fuzz_baf`: both parsers and every BAF writer, in
   `--legacy` and default mode with the BAF options), levels (`fuzz_b3d_file`: default,
   `--keep-decompressed`, `--legacy`), LAB extraction (`fuzz_lab_file`) and `.Z` extraction
   (`fuzz_z`). The file-level targets run in a scratch folder of their own and fail when anything
@@ -390,7 +414,8 @@ behaviour and refuses it on the command line):
 | new: `zextract.*` | `.Z` extraction |
 | new: `jkout.*` | retail JK MAT and CMP writers, nearest-colour remapping, mipmaps |
 | new: `b3d_geom.*` | level geometry decoder and OBJ/MTL writer |
-| new: `vima.*` | the VIMA ADPCM decoder of the voice files |
-| new: `sound.*` | voice files to WAV, the WAV writer |
+| new: `vima.*` | the VIMA ADPCM decoder of the voice files and music blocks |
+| new: `sound.*` | voice files and music files to WAV, music maps as text, the WAV writer |
+| new: `imuse.*` | the music tables of IMUSE.DLL |
 | new: `tests/` | unit tests, end-to-end runner, fixture generator, fuzz targets |
 | new: `CMakeLists.txt`, `Makefile`, `cmake/*.cmake`, `.gitignore`, `CHANGES.md`, `NOTICE` | build files and documentation |

@@ -4,17 +4,18 @@
 // platform layer does directories, globbing and the key press), command-line options and
 // --legacy, the commands all/z/lab/b3d/b3dall/baf/bafall, a case-insensitive level scan, errors
 // that skip one file instead of ending the run, exit codes, and no key press at the end unless
-// --pause is given; level geometry (OBJ/MTL) in the level commands' help; sound: the command wv
-// and, in default mode, the voice files of LAB archives decoded to WAV.
+// --pause is given; level geometry (OBJ/MTL) in the level commands' help; sound: the commands
+// wv/imc/music/imuse and, in default mode, the disc's music folder decoded into music/.
 //
 // "tpmextractor DiscDir DumpDir" (the command "all") does what the original main() did, in the
 // same order and with the same output names: BIG.Z -> big.lab -> biglab/, LOCALIZE.LAB ->
 // localizelab/, VOICE.LAB -> voicelab/, the levels -> LEVEL/<NAME>/, and every biglab/*.baf ->
-// BAF/<name>/. Default mode also decodes the voice files.
+// BAF/<name>/. Default mode also decodes the voice files and the music (music/).
 
 #include "b3d.h"
 #include "baf.h"
 #include "image.h"
+#include "imuse.h"
 #include "lab.h"
 #include "log.h"
 #include "options.h"
@@ -44,7 +45,7 @@ const char* const kLegacyLevels[] = {"ASSAULT.B3D", "BIGCITY.B3D", "ESPA.B3D",  
                                      "FINAL.B3D",   "GARDEN.B3D",  "GUNGA.B3D", "MAUL.B3D",
                                      "QUEEN.B3D",   "RACE.B3D",    "SWAMP.B3D"};
 
-enum class Command { All, Z, Lab, B3d, B3dAll, Baf, BafAll, Wv };
+enum class Command { All, Z, Lab, B3d, B3dAll, Baf, BafAll, Wv, Imc, Music, Imuse };
 
 struct CommandSpec
 {
@@ -59,7 +60,12 @@ const CommandSpec kCommands[] = {
     {"lab", Command::Lab, "FILE.LAB OUTDIR", false},    {"b3d", Command::B3d, "FILE.B3D OUTDIR", false},
     {"b3dall", Command::B3dAll, "DIR OUTDIR", false},   {"baf", Command::Baf, "FILE.BAF OUTDIR", false},
     {"bafall", Command::BafAll, "DIR OUTDIR", false},   {"wv", Command::Wv, "FILE.WV OUTDIR", true},
+    {"imc", Command::Imc, "FILE.IMC OUTDIR", true},     {"music", Command::Music, "DIR OUTDIR", true},
+    {"imuse", Command::Imuse, "IMUSE.DLL OUTDIR", true},
 };
+
+// The disc's music folder, relative to the disc root (the first that exists, any case).
+const char* const kMusicDirs[] = {"MUSIC", "GAMEDATA/MUSIC"};
 
 const CommandSpec* find_command(const std::string& name)
 {
@@ -81,6 +87,8 @@ const char kCommandHelp[] =
     "                           GAMEDATA/GOBS/LOCALIZE.LAB -> DumpDir/localizelab/\n"
     "                           GAMEDATA/GOBS/VOICE.LAB -> DumpDir/voicelab/ (default mode:\n"
     "                           also each voice file decoded to <file>.wav)\n"
+    "                           MUSIC or GAMEDATA/MUSIC, if there -> DumpDir/music/ (default\n"
+    "                           mode: every *.IMC decoded as the music command does)\n"
     "                           GAMEDATA/LEVEL/*.B3D -> DumpDir/LEVEL/<NAME>/\n"
     "                           DumpDir/biglab/*.baf -> DumpDir/BAF/<name>/\n"
     "  z FILE.Z OUTDIR        every file of an InstallShield v3 archive (BIG.Z holds big.lab)\n"
@@ -92,11 +100,16 @@ const char kCommandHelp[] =
     "  baf FILE.BAF OUTDIR    one actor -> OUTDIR/<name>/ (colormap, MATs, BMPs, 3DO, KEYs)\n"
     "  bafall DIR OUTDIR      every *.BAF file in DIR -> OUTDIR/<name>/\n"
     "  wv FILE.WV OUTDIR      one voice file -> OUTDIR/<file>.wav (16-bit PCM)\n"
+    "  imc FILE.IMC OUTDIR    one music file -> OUTDIR/<file>.wav (16-bit PCM) and\n"
+    "                         OUTDIR/<file>.imap.txt (its map: loop, regions, markers)\n"
+    "  music DIR OUTDIR       every *.IMC file in DIR, as imc does\n"
+    "  imuse IMUSE.DLL OUTDIR the music tables of the game's IMUSE.DLL (which music ids play\n"
+    "                         which file) -> OUTDIR/imuse_tables.txt\n"
     "  <NAME> and <name> are the file name up to its first '.', <file> the file name without\n"
     "  its extension. Levels found by a directory scan get <NAME> in upper case, as the\n"
     "  original's level list. In the OBJ/MTL file names, characters of <NAME> other than ASCII\n"
-    "  letters, digits, '_' and '-' become '_'. The sound command wv is new in the fork: --legacy\n"
-    "  refuses it.\n"
+    "  letters, digits, '_' and '-' become '_'. The sound commands are new in the fork: --legacy\n"
+    "  refuses them.\n"
     "\n";
 
 const char kHelpNotes[] =
@@ -340,6 +353,42 @@ unsigned process_baf_dir(const std::string& baf_dir, const std::string& out_root
     return failed;
 }
 
+// -------------------------------------------------------------------------------- music
+
+// Every *.IMC file (any case; folders skipped) in `dir`, in NTFS order, into `out_dir`: <file>.wav
+// and <file>.imap.txt each. Returns the number of files that failed; `found` counts the files
+// attempted.
+unsigned process_music_dir(const std::string& dir, const std::string& out_dir, const Options& opts, unsigned& found)
+{
+    found = 0;
+    std::vector<std::string> names;
+    if (!list_files(dir, "*.imc", names))
+        return 1;
+    unsigned failed = 0;
+    std::set<std::string> used;
+    for (const std::string& name : names) {
+        const std::string path = platform::path_join(dir, name);
+        if (!used.insert(upper_ascii(sound_output_name(name, ""))).second)
+            log::warn("%s: gives the same output names as another music file; files may be overwritten\n",
+                      path.c_str());
+        found++;
+        if (!process_imc(path, name, out_dir, opts))
+            failed++;
+    }
+    return failed;
+}
+
+// The disc's music folder (kMusicDirs, any case), or "" when it has none.
+std::string find_music_dir(const std::string& disc_root)
+{
+    for (const char* rel : kMusicDirs) {
+        const std::string d = platform::resolve_ci(disc_root, rel);
+        if (platform::is_dir(d))
+            return d;
+    }
+    return std::string();
+}
+
 // ---------------------------------------------------------------------------- the disc
 
 // One LAB archive from the disc into <dump_root>/<dump_name>. The folder is always created; a
@@ -425,6 +474,26 @@ int run_all(const std::string& disc_root, const std::string& dump_root, const Op
         failed++;
     if (!extract_disc_lab(disc_root, dump_root, "GAMEDATA/GOBS/VOICE.LAB", "VOICE.LAB", "voicelab", opts))
         failed++;
+
+    // Music (default mode): MUSIC or GAMEDATA/MUSIC -> <dump>/music/, only when the disc has it.
+    // --legacy pins --sound none: the original never read the music.
+    if (opts.sound == SoundMode::Wav) {
+        const std::string music_dir = find_music_dir(disc_root);
+        if (music_dir.empty()) {
+            log::verbose("No music folder (MUSIC or GAMEDATA/MUSIC) on the disc\n");
+        } else {
+            const std::string out = platform::path_join(dump_root, "music");
+            if (!ensure_dir(out)) {
+                failed++;
+            } else {
+                log::info("Decode the music in %s to: %s...\n", music_dir.c_str(), out.c_str());
+                unsigned found = 0;
+                failed += process_music_dir(music_dir, out, opts, found);
+                if (found == 0)
+                    log::warn("%s: no *.IMC files found\n", music_dir.c_str());
+            }
+        }
+    }
 
     // Levels -> <dump>/LEVEL/<NAME>/
     {
@@ -532,6 +601,37 @@ int run_wv(const std::string& input, const std::string& out_dir, const Options& 
     return process_wv(path, platform::base_name(input), out_dir, opts) ? kExitOk : kExitErrors;
 }
 
+int run_imc(const std::string& input, const std::string& out_dir, const Options& opts)
+{
+    const std::string path = input_file(input);
+    if (path.empty() || !prepare_out_dir(out_dir))
+        return kExitFatal;
+    return process_imc(path, platform::base_name(input), out_dir, opts) ? kExitOk : kExitErrors;
+}
+
+int run_music(const std::string& input, const std::string& out_dir, const Options& opts)
+{
+    const std::string dir = input_dir(input);
+    if (dir.empty() || !prepare_out_dir(out_dir))
+        return kExitFatal;
+    log::info("Decode the music in %s to: %s...\n", dir.c_str(), out_dir.c_str());
+    unsigned found = 0;
+    const unsigned failed = process_music_dir(dir, out_dir, opts, found);
+    if (found == 0 && failed == 0) {
+        log::error("%s: no *.IMC files found\n", dir.c_str());
+        return kExitFatal;
+    }
+    return failed ? kExitErrors : kExitOk;
+}
+
+int run_imuse(const std::string& input, const std::string& out_dir, const Options& opts)
+{
+    const std::string path = input_file(input);
+    if (path.empty() || !prepare_out_dir(out_dir))
+        return kExitFatal;
+    return process_imuse(path, out_dir, opts) ? kExitOk : kExitErrors;
+}
+
 int run_command(Command command, const std::string& input, const std::string& out_dir, const Options& opts,
                 const Palette* fallback)
 {
@@ -544,6 +644,9 @@ int run_command(Command command, const std::string& input, const std::string& ou
     case Command::Baf: return run_baf(input, out_dir, opts, fallback);
     case Command::BafAll: return run_bafall(input, out_dir, opts, fallback);
     case Command::Wv: return run_wv(input, out_dir, opts);
+    case Command::Imc: return run_imc(input, out_dir, opts);
+    case Command::Music: return run_music(input, out_dir, opts);
+    case Command::Imuse: return run_imuse(input, out_dir, opts);
     }
     return kExitFatal;
 }
@@ -586,8 +689,8 @@ int main(int argc, char* argv[])
     if (pos.size() == 3) {
         command = find_command(pos[0]);
         if (!command) {
-            log::error("unknown command \"%s\" (commands: all, z, lab, b3d, b3dall, baf, bafall, wv; to extract a "
-                       "disc give only DiscDir and DumpDir)\n",
+            log::error("unknown command \"%s\" (commands: all, z, lab, b3d, b3dall, baf, bafall, wv, imc, music, "
+                       "imuse; to extract a disc give only DiscDir and DumpDir)\n",
                        printable(pos[0]).c_str());
             print_short_usage(prog);
             return finish(kExitFatal, opts);
@@ -599,7 +702,7 @@ int main(int argc, char* argv[])
             print_short_usage(prog);
             return finish(kExitFatal, opts);
         }
-        if (command->sound && opts.sound == SoundMode::None) {
+        if (command->sound && command->command != Command::Imuse && opts.sound == SoundMode::None) {
             log::error("--sound none turns sound decoding off, which is what the %s command does\n", command->name);
             print_short_usage(prog);
             return finish(kExitFatal, opts);

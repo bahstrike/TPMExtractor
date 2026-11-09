@@ -1,12 +1,14 @@
 // TPMExtractor fork - unit tests of the sound code: the VIMA tables (against closed forms computed
 // here), the bit reader and the decoder on hand-made streams (escapes, the rounding term, the
 // index changes, clamping, stereo channel order, the two header predictors, WVSM blocks, read-ahead
-// at the end of the data), the error offsets of voice files, the WAV header bytes and output names.
+// at the end of the data), the error offsets, the WAV header bytes, output names, a music file of
+// raw blocks only and one with a hand-coded VIMA block, and the music-table text.
 // Copyright 2026 the TPMExtractor fork contributors. Licensed under the Apache License,
 // Version 2.0 (see LICENSE). New file in the fork (see CHANGES.md).
 //
 // Generic data only. Exit 0 = pass, 1 = fail.
 #include "binreader.h"
+#include "imuse.h"
 #include "log.h"
 #include "sound.h"
 #include "vima.h"
@@ -14,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace tpmx;
@@ -251,6 +254,7 @@ static void test_wav()
     CHECK(sound_output_name("LINE1.WV", ".wav") == "LINE1.wav");
     CHECK(sound_output_name("a.b.imc", ".imap.txt") == "a.b.imap.txt");
     CHECK(sound_output_name("noext", ".wav") == "noext.wav");
+    CHECK(sound_printable("a\"b\\c\x01\xE9") == "a\\x22b\\x5Cc\\x01\\xE9");
 }
 
 // -------------------------------------------------------------------------------- voice file
@@ -292,6 +296,115 @@ static void test_voice()
     CHECK(error_offset([&] { wv_decode(cut.data(), cut.size(), "x.lab", base, ""); }) == 0x1016);
 }
 
+// -------------------------------------------------------------------------------- music file
+
+static void put_be32(std::vector<uint8_t>& v, uint32_t x)
+{
+    for (int k = 3; k >= 0; k--)
+        v.push_back((uint8_t)(x >> (8 * k)));
+}
+
+static void event(std::vector<uint8_t>& m, const char* tag, const std::vector<uint32_t>& words)
+{
+    m.insert(m.end(), tag, tag + 4);
+    put_be32(m, (uint32_t)(4 * words.size()));
+    for (uint32_t w : words)
+        put_be32(m, w);
+}
+
+// A music file: an iMUS header (FRMT, REGN over the audio, STOP) stored raw, then `blocks` VIMA
+// blocks given as (decoded size, stored bytes).
+static std::vector<uint8_t> music_file(uint32_t frames, int channels,
+                                       const std::vector<std::pair<uint32_t, std::vector<uint8_t>>>& blocks)
+{
+    const uint32_t fb = 2 * (uint32_t)channels;
+    std::vector<uint8_t> map;
+    const uint32_t map_size = 28 + 16 + 12;  // FRMT, REGN, STOP
+    const uint32_t start = map_size + 24;
+    event(map, "FRMT", {start, 1, 16, 22050, (uint32_t)channels});
+    event(map, "REGN", {start, frames * fb});
+    event(map, "STOP", {start + frames * fb});
+    std::vector<uint8_t> head = {'i', 'M', 'U', 'S', 0, 0, 0, 0, 'M', 'A', 'P', ' '};
+    put_be32(head, (uint32_t)map.size());
+    head.insert(head.end(), map.begin(), map.end());
+    head.push_back('D');
+    head.push_back('A');
+    head.push_back('T');
+    head.push_back('A');
+    put_be32(head, frames * fb);
+    std::vector<uint8_t> f = {'M', 'C', 'M', 'P', 0, (uint8_t)(1 + blocks.size())};
+    f.push_back(0);
+    put_be32(f, (uint32_t)head.size());
+    put_be32(f, (uint32_t)head.size());
+    for (const auto& b : blocks) {
+        f.push_back(1);
+        put_be32(f, b.first);
+        put_be32(f, (uint32_t)b.second.size());
+    }
+    const char names[] = "NULL\0VIMA";
+    f.push_back(0);
+    f.push_back(10);
+    f.insert(f.end(), names, names + 10);
+    f.insert(f.end(), head.begin(), head.end());
+    for (const auto& b : blocks)
+        f.insert(f.end(), b.second.begin(), b.second.end());
+    return f;
+}
+
+static void test_music()
+{
+    // raw blocks only: the container, the map and an empty track
+    std::vector<uint8_t> f = music_file(0, 2, {});
+    ImcTrack t = imc_decode(f.data(), f.size(), "empty.imc");
+    CHECK(t.samples.empty() && t.channels == 2 && t.rate == 22050 && t.events.size() == 3 && t.header_bytes == 80);
+    const std::string text = imc_map_text(t, "empty.imc");
+    CHECK(text.find("format\tframes=0\trate=22050\tchannels=2\tbits=16\tframe_bytes=4\theader_bytes=80\n") !=
+          std::string::npos);
+    CHECK(text.find("FRMT\t0\tflag=1\tbits=16\trate=22050\tchannels=2\nREGN\t0\tframes=0\nSTOP\t0\n") !=
+          std::string::npos);
+    // a hand-coded stereo VIMA block of two frames
+    Bits b;
+    b.put(0x7, 4);
+    b.put(0x0102, 16);
+    b.put(0x0, 4);
+    b.put(0x1, 4);
+    b.put(0x9, 4);
+    std::vector<uint8_t> blk = {0xFF, 0, 0, 0, 0, 0};
+    blk.insert(blk.end(), b.out.begin(), b.out.end());
+    f = music_file(2, 2, {{8, blk}});
+    t = imc_decode(f.data(), f.size(), "two.imc");
+    const int d = (kVimaStep[0] >> 2) + (kVimaStep[0] >> 3);  // magnitude 1 at index 0; the index stays 0
+    CHECK(t.samples.size() == 4 && t.samples[0] == 0x102 && t.samples[2] == 0x102 && t.samples[1] == d &&
+          t.samples[3] == 0);
+    // the block sizes must add up to the file: one byte more is an error where it starts
+    std::vector<uint8_t> more = f;
+    more.push_back(0);
+    CHECK(error_offset([&] { imc_decode(more.data(), more.size(), "x.imc"); }) == (long long)f.size());
+    // a block that decodes to more samples than its codes can hold: at its entry
+    std::vector<uint8_t> big = music_file(64, 2, {{256, blk}});
+    CHECK(error_offset([&] { imc_decode(big.data(), big.size(), "x.imc"); }) == 6 + 9);
+}
+
+// ------------------------------------------------------------------------------- music tables
+
+static void test_imuse_text()
+{
+    ImuseTables t;
+    t.states.push_back(ImuseRecord{"", "NULL0", 0, 1000, 0, 0, 0});
+    t.states.push_back(ImuseRecord{"Key1", "s1", 3, 1001, 1, 0, 0});
+    t.sequences.push_back(ImuseRecord{"key1", "q0", 4, 2000, 0, 0, 0});
+    t.files.push_back(ImuseFile{"key1", "KEY1.IMC"});
+    CHECK(imuse_find_file(t, "key1") == 0 && imuse_find_file(t, "Key1") == -1 && imuse_find_file(t, "") == -1);
+    const std::string s = imuse_tables_text(t, "x.dll");
+    CHECK(s.find("state\t0\t1000\t0\t0\t0\t0\t\"\"\t\"NULL0\"\t-\n") != std::string::npos);
+    CHECK(s.find("state\t1\t1001\t3\t1\t0\t0\t\"Key1\"\t\"s1\"\t-\n") != std::string::npos);
+    CHECK(s.find("sequence\t0\t2000\t4\t0\t0\t0\t\"key1\"\t\"q0\"\t\"KEY1.IMC\"\n") != std::string::npos);
+    CHECK(s.find("# records with a key that matches no file key byte for byte: 1\n") != std::string::npos);
+    CHECK(s.find("file\t0\t\"key1\"\t\"KEY1.IMC\"\n") != std::string::npos);
+    std::vector<uint8_t> notpe = {'M', 'Z', 0};
+    CHECK(error_offset([&] { imuse_read_tables(notpe.data(), notpe.size(), "x.dll"); }) == 0);
+}
+
 int main()
 {
     log::set_verbosity(-2);
@@ -301,6 +414,8 @@ int main()
     test_wvsm();
     test_wav();
     test_voice();
+    test_music();
+    test_imuse_text();
     std::printf("unit_sound: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

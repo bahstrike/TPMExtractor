@@ -25,9 +25,10 @@ default mode, and checks:
     an independent decoder and, given one (--ref-b3d-decompress), a build of the original decoder;
   - damaged inputs are reported and skipped, never crash or hang; names from data never leave the
     output folder;
-  - sound: the voice files the tool writes (wv) equal an independent model's (make_fixtures.wv_model)
-    on synthetic files made by a test encoder; the lab command and the disc run decode voice files
-    in default mode, never with --sound none or --legacy; --legacy refuses the wv command and
+  - sound: the voice files (wv), music files (imc, music) and music tables (imuse) the tool writes
+    equal an independent model's (make_fixtures.wv_model, imc_model, imuse_model) on synthetic files
+    made by a test encoder; the lab command and the disc run decode voice files and the music folder
+    in default mode, never with --sound none or --legacy; --legacy refuses the sound commands and
     --sound; damaged copies are refused with an error at the offset the model gives and write
     nothing, never outside their output folder;
   - no AddressSanitizer/UndefinedBehaviorSanitizer/LeakSanitizer report in any run.
@@ -41,9 +42,11 @@ deleting them afterwards:
   - a default-mode run over the whole disc: every retail CMP, 8-bit MAT and 3DO is checked as
     above, and every file that default mode must not change is compared with the --legacy dump;
   - every level's OBJ/MTL against the independent geometry model, byte for byte.
-Real sound data (only when TPM_VOICE_LAB is set): your VOICE.LAB, every voice file decoded by the
-lab command; TPM_WV_MANIFEST (a manifest of the decoded PCM's SHA-256, kept outside the
-repository) makes it compare every PCM hash.
+Real sound data (each test only when its variable is set): TPM_VOICE_LAB (your VOICE.LAB: every
+voice file decoded by the lab command), TPM_MUSIC_DIR (your music folder: every track through the
+music command), TPM_IMUSE_DLL (your IMUSE.DLL: the music tables); TPM_WV_MANIFEST and
+TPM_IMC_MANIFEST (manifests of the decoded PCM's SHA-256, kept outside the repository) make them
+compare every PCM hash, and the music manifest's frame counts and loop points.
   Only counts are printed; no file content is.
 
 Exit status: 0 all selected tests passed (some may be skipped), 77 every selected test was
@@ -1086,7 +1089,7 @@ def disc(ctx):
         levels = [(n, LEVEL_SPECS[cycle[i % 3]]) for i, n in enumerate(legacy_level_names(ctx))]
         levels += [(n, LEVEL_SPECS[n]) for n in cycle if n not in [l[0] for l in levels]]
         levels.append(('raw.b3d', LEVEL_SPECS['FLAT.B3D'], False))
-        info = mf.write_disc(root, levels=levels)
+        info = mf.write_disc(root, levels=levels, music='MUSIC')
         info['root'] = root
         info['legacy_levels'] = legacy_level_names(ctx)
         return info
@@ -1106,6 +1109,16 @@ def expected_lab_dirs(info, decode=False):
             exp['voicelab/' + n] = d
             if decode and n.lower().endswith('.wv'):
                 exp['voicelab/' + mf.sound_stem(n) + '.wav'] = mf.wv_expected(d)
+    return exp
+
+
+def expected_music(files, prefix=''):
+    """{prefix + name: bytes} the music command (and the disc run's music/) writes for the files
+    [(name, bytes)]."""
+    exp = {}
+    for n, d in files:
+        for k, v in mf.imc_expected(d, n).items():
+            exp[prefix + k] = v
     return exp
 
 
@@ -1469,7 +1482,8 @@ def t_disc_default(ctx):
     sound_run(r, pb)
     tree = read_tree(out)
     exp = expected_lab_dirs(info, decode=True)
-    compare_files({k: v for k, v in tree.items() if k.split('/')[0] in ('biglab', 'localizelab', 'voicelab')},
+    exp.update(expected_music(info['music'], 'music/'))
+    compare_files({k: v for k, v in tree.items() if k.split('/')[0] in ('biglab', 'localizelab', 'voicelab', 'music')},
                   exp, 'default mode', pb)
     level_exp = {}
     for fname in info['levels']:
@@ -2225,19 +2239,22 @@ def t_unsafe(ctx):
 
 
 def sound_inputs(ctx):
-    """The synthetic sound files: {'wv': dir, 'lab': LAB path}."""
+    """The synthetic sound files: {'wv': dir, 'imc': dir, 'imuse': DLL path, 'lab': LAB path}."""
     def make():
         root = fresh_dir(ctx.path('sound_in'))
-        d = {'wv': os.path.join(root, 'wv')}
+        d = {'wv': os.path.join(root, 'wv'), 'imc': os.path.join(root, 'imc')}
         for n, data, _ in mf.voice_fixtures():
             write(os.path.join(d['wv'], n), data)
+        for n, data, _ in mf.music_fixtures():
+            write(os.path.join(d['imc'], n), data)
+        d['imuse'] = write(os.path.join(root, 'dll', 'IMUSE.DLL'), mf.make_imuse_dll()[0])
         d['lab'] = write(os.path.join(root, 'lab', 'voice.lab'), mf.make_lab(mf.sound_lab_entries()))
         return d
     return ctx.memo('sound_inputs', make)
 
 
 # What the tool's warnings say for the model's warning kinds.
-SOUND_WARNINGS = {'datasize': 'data size', 'frames': 'not a whole number'}
+SOUND_WARNINGS = {'datasize': 'data size', 'frames': 'not a whole number', 'byteorder': 'byte-order flag 0'}
 
 
 def check_sound_warnings(r, expected, label, pb):
@@ -2280,6 +2297,105 @@ def t_sound_wv(ctx):
         m = mf.wv_model(data)
         pb.check(parse_wav(want) == (m['rate'], m['channels'], len(m['samples'])), 'wv %s: not a canonical WAV' % name)
         check_sound_warnings(r, m['warnings'], 'wv %s' % name, pb)
+    pb.done()
+
+
+@test('sound.imc')
+def t_sound_imc(ctx):
+    """Every synthetic music file through the imc command: the WAV and the map text equal the
+    model's (loops, one-shots with an "_end" marker, plain one-shots, mono and stereo, the header
+    in one or two raw blocks with NULL or NONE codec names, restarted and WVSM blocks, a SYNC event,
+    a last block of one frame)."""
+    pb = Problems()
+    d = sound_inputs(ctx)
+    for name, data, _ in mf.music_fixtures():
+        out = ctx.path('imc_out', mf.sound_stem(name))
+        shutil.rmtree(out, ignore_errors=True)
+        r = ctx.tool('--no-pause', 'imc', os.path.join(d['imc'], name), out)
+        if not sound_run(r, pb, what='imc %s' % name):
+            continue
+        pb.check(not r.warnings(), 'imc %s: warnings %s' % (name, r.warnings()[:3]))
+        exp = mf.imc_expected(data, name)
+        compare_files(read_tree(out), exp, 'imc %s' % name, pb)
+        m = mf.imc_model(data, name)
+        pb.check(parse_wav(exp[mf.sound_stem(name) + '.wav']) == (m['rate'], m['channels'], len(m['samples'])),
+                 'imc %s: not a canonical WAV' % name)
+        text = exp[mf.sound_stem(name) + '.imap.txt'].decode('ascii')
+        pb.check(text.count('\r\n') == text.count('\n') and '\tframes=' in text, 'imc %s: map text form' % name)
+    pb.done()
+
+
+def case_sensitive_fs(folder):
+    """True when `folder` can hold two names that differ only in case."""
+    a, b = os.path.join(folder, 'case_probe'), os.path.join(folder, 'CASE_PROBE')
+    write(a, b'a')
+    write(b, b'b')
+    distinct = sorted(os.listdir(folder)).count('case_probe') == 1 and len(os.listdir(folder)) >= 2
+    for p in (a, b):
+        if os.path.exists(p):
+            os.remove(p)
+    return distinct
+
+
+@test('sound.music')
+def t_sound_music(ctx):
+    """The music command over a folder: every *.IMC in any case (folders and other names skipped),
+    a damaged file reported while the others are written, a folder without music refused, and two
+    files that give the same output names (on case-sensitive file systems) a warning."""
+    pb = Problems()
+    fx = {n: d for n, d, _ in mf.music_fixtures()}
+    src = fresh_dir(ctx.path('music_in'))
+    files = [('LOOP.IMC', fx['loop.imc']), ('oneshot.Imc', fx['oneshot.imc']), ('plain.imc', fx['plain.imc'])]
+    for n, data in files:
+        write(os.path.join(src, n), data)
+    write(os.path.join(src, 'notes.imcx'), b'not music')
+    os.makedirs(os.path.join(src, 'folder.imc'))
+    broken = dict(mf.music_mutants())['imc_frmtbits']
+    write(os.path.join(src, 'broken.imc'), broken)
+    out = ctx.path('music_out')
+    shutil.rmtree(out, ignore_errors=True)
+    r = ctx.tool('--no-pause', 'music', src, out)
+    if sound_run(r, pb, allowed_rc=(1,), allow_errors=True, what='music over a folder with a damaged file'):
+        pb.check(any('broken.imc' in l for l in r.errors()), 'music: no error names the damaged file: %s' % r.errors())
+        compare_files(read_tree(out), expected_music(files), 'music', pb)
+    empty = fresh_dir(ctx.path('music_empty'))
+    write(os.path.join(empty, 'readme.txt'), b'no music here')
+    r = ctx.tool('--no-pause', 'music', empty, ctx.path('music_empty_out'))
+    sound_run(r, pb, allowed_rc=(2,), allow_errors=True, what='music over a folder without *.IMC files')
+    probe = fresh_dir(ctx.path('music_case'))
+    if case_sensitive_fs(probe):
+        write(os.path.join(probe, 'same.imc'), fx['plain.imc'])
+        write(os.path.join(probe, 'SAME.IMC'), fx['plain.imc'])
+        r = ctx.tool('--no-pause', 'music', probe, ctx.path('music_case_out'))
+        sound_run(r, pb, what='music with same.imc and SAME.IMC')
+        pb.check(any('same output names' in w for w in r.warnings()), 'music: no warning about same.imc and SAME.IMC')
+    pb.done()
+
+
+@test('sound.imuse')
+def t_sound_imuse(ctx):
+    """The imuse command on a synthetic DLL: the tables are found by their structure (past a decoy
+    record) and written as the model writes them, with the one key that matches its file key only
+    ignoring case resolved to none; a DLL with 8 bytes between the tables works too."""
+    pb = Problems()
+    d = sound_inputs(ctx)
+    out = ctx.path('imuse_out')
+    shutil.rmtree(out, ignore_errors=True)
+    r = ctx.tool('--no-pause', 'imuse', d['imuse'], out)
+    if sound_run(r, pb, what='imuse'):
+        text, counts = mf.imuse_model(open(d['imuse'], 'rb').read(), 'IMUSE.DLL')
+        compare_files(read_tree(out), {'imuse_tables.txt': mf.crlf(text)}, 'imuse', pb)
+        pb.check(counts['unmatched'] == 1, 'imuse: the model resolves %d keys to none' % counts['unmatched'])
+    # --sound none does not concern the music tables
+    states, seqs, files = mf.imuse_tables_spec()
+    gap = write(ctx.path('imuse_gap', 'IMUSE.DLL'), mf.make_imuse_dll(states, seqs, files, gap=8)[0])
+    out = ctx.path('imuse_gap_out')
+    shutil.rmtree(out, ignore_errors=True)
+    r = ctx.tool('--no-pause', '--sound', 'none', 'imuse', gap, out)
+    if sound_run(r, pb, what='--sound none imuse (8-byte gap)'):
+        compare_files(read_tree(out), {'imuse_tables.txt': mf.crlf(mf.imuse_model(open(gap, 'rb').read(),
+                                                                                   'IMUSE.DLL')[0])},
+                      'imuse (8-byte gap)', pb)
     pb.done()
 
 
@@ -2342,32 +2458,66 @@ def t_sound_lab(ctx):
 
 @test('sound.disc')
 def t_sound_disc(ctx):
-    """The disc run's sound: --sound none writes the default dump without the decoded voice files
-    and changes nothing else."""
+    """The disc run's sound: the music folder found as MUSIC or GAMEDATA/MUSIC in any case (MUSIC
+    first; here GAMEDATA/music and Music), decoded into music/; no music/ without a music folder;
+    --sound none writes neither the decoded voices nor music/ and changes nothing else."""
     pb = Problems()
     info = disc(ctx)
     root = fresh_dir(ctx.path('sound_disc'))
-    ref, _ = disc_dump(ctx, 'default')
+    fx = {n: d for n, d, _ in mf.music_fixtures()}
+    # music under gamedata/music (lower case), no MUSIC
+    d1 = os.path.join(root, 'd1')
+    i1 = mf.write_disc(d1, levels=[], music='GAMEDATA/music')
     out = os.path.join(root, 'o1')
+    r = ctx.tool('--no-pause', d1, out)
+    if sound_run(r, pb, what='disc run with GAMEDATA/music'):
+        got = sub_tree(read_tree(out), 'music')
+        compare_files(got, expected_music(i1['music']), 'disc run with GAMEDATA/music', pb)
+        compare_files(sub_tree(read_tree(out), 'voicelab'), sub_tree(expected_lab_dirs(i1, decode=True), 'voicelab'),
+                      'disc run with GAMEDATA/music: voicelab', pb)
+    # both: MUSIC wins over GAMEDATA/MUSIC
+    d2 = os.path.join(root, 'd2')
+    mf.write_disc(d2, levels=[], music='Music')
+    write(os.path.join(d2, 'GAMEDATA', 'MUSIC', 'other.imc'), fx['edge.imc'])
+    out = os.path.join(root, 'o2')
+    r = ctx.tool('--no-pause', d2, out)
+    if sound_run(r, pb, what='disc run with Music and GAMEDATA/MUSIC'):
+        compare_files(sub_tree(read_tree(out), 'music'), expected_music(mf.disc_music_files()),
+                      'disc run with Music and GAMEDATA/MUSIC', pb)
+    # no music folder: no music/
+    d3 = os.path.join(root, 'd3')
+    mf.write_disc(d3, levels=[])
+    out = os.path.join(root, 'o3')
+    r = ctx.tool('--no-pause', d3, out)
+    if sound_run(r, pb, what='disc run without music'):
+        pb.check(not os.path.exists(os.path.join(out, 'music')), 'disc run without music: wrote music/')
+    # --sound none on the shared disc: the default dump without the decoded voices and music/
+    ref, _ = disc_dump(ctx, 'default')
+    out = os.path.join(root, 'o4')
     r = ctx.tool('--no-pause', '--sound', 'none', info['root'], out)
     if sound_run(r, pb, what='--sound none disc run'):
-        want = {k: v for k, v in read_tree(ref).items() if not (k.startswith('voicelab/') and k.endswith('.wav'))}
+        want = {k: v for k, v in read_tree(ref).items()
+                if not k.startswith('music/') and not (k.startswith('voicelab/') and k.endswith('.wav'))}
         compare_files(read_tree(out), want, '--sound none disc run', pb)
+        pb.check(not os.path.exists(os.path.join(out, 'music')), '--sound none: wrote music/')
     shutil.rmtree(root, ignore_errors=True)
     pb.done()
 
 
 @test('sound.options')
 def t_sound_options(ctx):
-    """--legacy refuses --sound and the wv command, --sound none refuses the wv command, and bad
-    --sound values are usage errors; none of them writes anything."""
+    """--legacy refuses --sound and the sound commands, --sound none refuses the decoding commands,
+    and bad --sound values are usage errors; none of them writes anything."""
     pb = Problems()
     d = sound_inputs(ctx)
     info = disc(ctx)
     wv = os.path.join(d['wv'], 'sine.wv')
+    imc = os.path.join(d['imc'], 'loop.imc')
     cases = [(['--legacy', '--sound', 'wav'], [info['root']]), (['--legacy', '--sound=none'], [info['root']]),
-             (['--legacy'], ['wv', wv]), (['--sound', 'none'], ['wv', wv]), (['--sound', 'mp3'], ['wv', wv]),
-             (['--sound'], [])]
+             (['--legacy'], ['wv', wv]), (['--legacy'], ['imc', imc]), (['--legacy'], ['music', d['imc']]),
+             (['--legacy'], ['imuse', d['imuse']]), (['--sound', 'none'], ['wv', wv]),
+             (['--sound', 'none'], ['imc', imc]), (['--sound', 'none'], ['music', d['imc']]),
+             (['--sound', 'mp3'], ['wv', wv]), (['--sound'], [])]
     for opts, args in cases:
         out = ctx.path('sound_usage_out')
         shutil.rmtree(out, ignore_errors=True)
@@ -2376,7 +2526,8 @@ def t_sound_options(ctx):
         sound_run(r, pb, allowed_rc=(2,), allow_errors=True, what=label)
         pb.check(not os.path.exists(out), '%s: created the output folder' % label)
     r = ctx.tool('--help')
-    pb.check(all(c in r.out for c in (b'  wv FILE.WV', b'--sound M')), '--help does not list wv and --sound')
+    pb.check(all(c in r.out for c in (b'  wv FILE.WV', b'  imc FILE.IMC', b'  music DIR', b'  imuse IMUSE.DLL',
+                                       b'--sound M')), '--help does not list the sound commands and --sound')
     pb.done()
 
 
@@ -2389,15 +2540,27 @@ def sound_mutant_cases():
             cases.append(('wv', name + '.wv', data, {name + '.wav': mf.wv_expected(data)}, None, m['warnings']))
         except mf.SoundError as e:
             cases.append(('wv', name + '.wv', data, None, e.offset, []))
+    for name, data in mf.music_mutants():
+        try:
+            m = mf.imc_model(data, name + '.imc')
+            cases.append(('imc', name + '.imc', data, mf.imc_expected(data, name + '.imc'), None, m['warnings']))
+        except mf.SoundError as e:
+            cases.append(('imc', name + '.imc', data, None, e.offset, []))
+    for name, data in mf.imuse_mutants():
+        try:
+            text, _ = mf.imuse_model(data, name + '.dll')
+            cases.append(('imuse', name + '.dll', data, {'imuse_tables.txt': mf.crlf(text)}, None, []))
+        except mf.SoundError as e:
+            cases.append(('imuse', name + '.dll', data, None, e.offset, []))
     return cases
 
 
 @test('robust.sound')
 def t_robust_sound(ctx):
-    """Damaged copies of the voice fixtures (cut at structure boundaries, fields overwritten): each
-    is refused with an error at the offset the model gives, writes nothing, and never anything
-    outside its output folder; the copies the model accepts are written as it says, with its
-    warnings."""
+    """Damaged copies of the voice, music and music-table fixtures (cut at structure boundaries,
+    fields overwritten): each is refused with an error at the offset the model gives, writes
+    nothing, and never anything outside its output folder; the copies the model accepts are written
+    as it says, with its warnings. Then the music command over all damaged music files at once."""
     pb = Problems()
     root = fresh_dir(ctx.path('damaged_sound'))
     counts = {'refused': 0, 'accepted': 0}
@@ -2425,7 +2588,19 @@ def t_robust_sound(ctx):
                 check_sound_warnings(r, warnings, label, pb)
     ctx.log('%d damaged sound files refused at the model\'s offset, %d accepted' % (counts['refused'],
                                                                                    counts['accepted']))
-    pb.check(counts['refused'] >= 25, 'only %d damaged sound files are refused' % counts['refused'])
+    pb.check(counts['refused'] >= 80, 'only %d damaged sound files are refused' % counts['refused'])
+    # the music command over every damaged music file and one good one
+    src = fresh_dir(os.path.join(root, 'batch'))
+    good = mf.music_fixtures()[0]
+    write(os.path.join(src, 'good.imc'), good[1])
+    for name, data in mf.music_mutants():
+        write(os.path.join(src, name + '.imc'), data)
+    out = os.path.join(root, 'batch_out')
+    r = ctx.tool('--no-pause', '-q', 'music', src, out, timeout=ctx.damaged_timeout)
+    if sound_run(r, pb, allowed_rc=(1,), allow_errors=True, what='music over the damaged music files'):
+        got = read_tree(out)
+        compare_files({k: v for k, v in got.items() if k.startswith('good.')}, expected_music([('good.imc', good[1])]),
+                      'music over the damaged files: the good file', pb)
     shutil.rmtree(root, ignore_errors=True)
     pb.done()
 
@@ -2866,6 +3041,21 @@ def pcm_sha256(wav):
     return hashlib.sha256(wav[44:]).hexdigest()
 
 
+def parse_map_text(data):
+    """The tool's map text: {'format': {key: int}, 'events': [(tag, frame, {key: value})]}."""
+    out = {'format': {}, 'events': []}
+    for line in data.decode('latin-1').split('\r\n'):
+        if not line or line.startswith('#'):
+            continue
+        cells = line.split('\t')
+        if cells[0] == 'format':
+            out['format'] = {k: int(v) for k, v in (c.split('=', 1) for c in cells[1:])}
+            continue
+        vals = dict(c.split('=', 1) for c in cells[2:])
+        out['events'].append((cells[0], int(cells[1]), vals))
+    return out
+
+
 @test('real.sound_voice', suite='real')
 def t_real_voice(ctx):
     """Every voice file of your VOICE.LAB (TPM_VOICE_LAB) through the lab command: one canonical WAV
@@ -2916,6 +3106,109 @@ def t_real_voice(ctx):
     pb.done(summary=True)
 
 
+@test('real.sound_music', suite='real')
+def t_real_music(ctx):
+    """Every music file in your music folder (TPM_MUSIC_DIR) through the music command: a canonical
+    WAV and a map text per file, the map's format equal to the WAV's, and (with TPM_IMC_MANIFEST)
+    every PCM hash equal to the manifest's, as are the frame counts and the loop points the manifest
+    lists (intro, loop, tail, JUMP, "_end"). Only counts are printed."""
+    folder = ctx.args.music_dir
+    if not folder:
+        raise Skip('TPM_MUSIC_DIR is not set')
+    pb = Problems()
+    out = os.path.join(real_work(ctx), 'music')
+    r = ctx.tool('--no-pause', 'music', folder, out, timeout=ctx.timeout * 10, real=True)
+    run_pb = Problems()
+    sound_run(r, run_pb, what='music on the music folder')
+    pb.raw += run_pb.items
+    man, head = sound_manifest(ctx.args.imc_manifest) if ctx.args.imc_manifest else (None, [])
+    tracks = [n for n in os.listdir(folder) if n.lower().endswith('.imc') and os.path.isfile(os.path.join(folder, n))]
+    t = {'match': 0, 'loops': 0, 'ends': 0, 'frames': 0, 'events': 0}
+    for n in tracks:
+        stem = mf.sound_stem(n)
+        wp, mp = os.path.join(out, stem + '.wav'), os.path.join(out, stem + '.imap.txt')
+        if not pb.check(os.path.isfile(wp) and os.path.isfile(mp), '%s: no WAV or map text' % n):
+            continue
+        with open(wp, 'rb') as f:
+            wav = f.read()
+        with open(mp, 'rb') as f:
+            m = parse_map_text(f.read())
+        w = parse_wav(wav)
+        fmt = m['format']
+        if not pb.check(w is not None and fmt and (w[0], w[1], w[2] // w[1]) == (fmt['rate'], fmt['channels'],
+                                                                                fmt['frames']),
+                        '%s: the WAV and the map text disagree' % n):
+            continue
+        t['frames'] += fmt['frames']
+        t['events'] += len(m['events'])
+        jumps = [e for e in m['events'] if e[0] == 'JUMP']
+        ends = [e for e in m['events'] if e[0] == 'TEXT' and e[2].get('text') == '"_end"']
+        t['loops'] += bool(jumps)
+        t['ends'] += bool(ends)
+        if man is None:
+            continue
+        row = man.get(n.upper())
+        if not pb.check(row is not None, '%s: not in the manifest' % n):
+            continue
+        if pb.check(row['_sha256'] == pcm_sha256(wav), '%s: the PCM differs from the manifest' % n):
+            t['match'] += 1
+        checks = {'frames': fmt['frames'], 'header': fmt['header_bytes']}
+        if jumps:
+            j, dest = jumps[0][1], int(jumps[0][2]['dest'])
+            checks.update(intro_frames=dest, loop_frames=j - dest, tail_frames=fmt['frames'] - j)
+        if ends:
+            checks['end_marker_frame'] = ends[0][1]
+        for k, v in checks.items():
+            if k in head and row.get(k, '') != '':
+                pb.check(int(row[k]) == v, '%s: %s differs from the manifest' % (n, k))
+    pb.check(tracks, 'no *.IMC files in TPM_MUSIC_DIR')
+    if man is not None:
+        pb.check(t['match'] == len(man), '%d of the manifest\'s %d tracks match' % (t['match'], len(man)))
+    print('    %d tracks decoded (%d frames, %d map events; %d loop, %d with an _end marker)%s' % (
+        len(tracks), t['frames'], t['events'], t['loops'], t['ends'],
+        '; PCM SHA-256 equal to the manifest in %d of %d' % (t['match'], len(man)) if man is not None
+        else '; no TPM_IMC_MANIFEST, hashes not compared'))
+    shutil.rmtree(out, ignore_errors=True)
+    pb.done(summary=True)
+
+
+@test('real.sound_imuse', suite='real')
+def t_real_imuse(ctx):
+    """The music tables of your IMUSE.DLL (TPM_IMUSE_DLL) through the imuse command: the record
+    counts in the text, every resolved file in the file table, and (with TPM_MUSIC_DIR) how many of
+    the table's files the music folder holds. Only counts are printed."""
+    dll = ctx.args.imuse_dll
+    if not dll:
+        raise Skip('TPM_IMUSE_DLL is not set')
+    pb = Problems()
+    out = os.path.join(real_work(ctx), 'imuse')
+    r = ctx.tool('--no-pause', 'imuse', dll, out, real=True)
+    run_pb = Problems()
+    sound_run(r, run_pb, what='imuse on IMUSE.DLL')
+    pb.raw += run_pb.items
+    path = os.path.join(out, 'imuse_tables.txt')
+    if not pb.check(os.path.isfile(path), 'no imuse_tables.txt'):
+        pb.done()
+    with open(path, 'rb') as f:
+        lines = [l.split('\t') for l in f.read().decode('latin-1').split('\r\n') if l and not l.startswith('#')]
+    rows = {k: [l for l in lines if l[0] == k] for k in ('state', 'sequence', 'file')}
+    counts = tuple(len(rows[k]) for k in ('state', 'sequence', 'file'))
+    pb.check(counts == mf.IMUSE_COUNTS, 'record counts %r' % (counts,))
+    files = {l[3] for l in rows['file']}
+    unresolved = sum(1 for k in ('state', 'sequence') for l in rows[k] if l[-1] == '-' and l[7] != '""')
+    pb.check(all(l[-1] == '-' or l[-1] in files for k in ('state', 'sequence') for l in rows[k]),
+             'a record resolves to a file that is not in the file table')
+    extra = ''
+    if ctx.args.music_dir:
+        on_disc = {n.upper() for n in os.listdir(ctx.args.music_dir) if n.lower().endswith('.imc')}
+        listed = {f.strip('"').upper() for f in files}
+        extra = '; the music folder holds %d of the %d listed files and %d files the table does not list' % (
+            len(listed & on_disc), len(listed), len(on_disc - listed))
+    print('    %d states, %d sequences, %d files; %d records with a key that matches no file key%s'
+          % (counts + (unresolved, extra)))
+    pb.done(summary=True)
+
+
 # ============================================================================ main
 
 
@@ -2938,6 +3231,10 @@ def main(argv=None):
     ap.add_argument('--voice-lab', default=env('TPM_VOICE_LAB'), help='your VOICE.LAB (TPM_VOICE_LAB)')
     ap.add_argument('--wv-manifest', default=env('TPM_WV_MANIFEST'),
                     help='manifest of the decoded voice files\' PCM SHA-256 (TPM_WV_MANIFEST)')
+    ap.add_argument('--music-dir', default=env('TPM_MUSIC_DIR'), help='your music folder (TPM_MUSIC_DIR)')
+    ap.add_argument('--imc-manifest', default=env('TPM_IMC_MANIFEST'),
+                    help='manifest of the decoded music files\' PCM SHA-256 (TPM_IMC_MANIFEST)')
+    ap.add_argument('--imuse-dll', default=env('TPM_IMUSE_DLL'), help='your IMUSE.DLL (TPM_IMUSE_DLL)')
     ap.add_argument('--keep', action='store_true', help='keep the synthetic outputs')
     ap.add_argument('--keep-real', action='store_true', help='keep the real-data dumps (game data: never share them)')
     ap.add_argument('-k', dest='only', action='append', default=[], help='run only tests whose name contains this')

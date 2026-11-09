@@ -46,6 +46,9 @@
     <ClCompile Include="image.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="imuse.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="jkout.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -106,6 +109,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="image.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="imuse.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="jkout.h">

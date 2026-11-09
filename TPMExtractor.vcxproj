@@ -131,6 +131,7 @@
     <ClCompile Include="binreader.cpp" />
     <ClCompile Include="bmp.cpp" />
     <ClCompile Include="image.cpp" />
+    <ClCompile Include="imuse.cpp" />
     <ClCompile Include="jkout.cpp" />
     <ClCompile Include="lab.cpp" />
     <ClCompile Include="log.cpp" />
@@ -153,6 +154,7 @@
     <ClInclude Include="binreader.h" />
     <ClInclude Include="bmp.h" />
     <ClInclude Include="image.h" />
+    <ClInclude Include="imuse.h" />
     <ClInclude Include="jkout.h" />
     <ClInclude Include="lab.h" />
     <ClInclude Include="log.h" />

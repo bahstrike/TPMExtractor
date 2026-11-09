@@ -25,6 +25,10 @@ Formats written (little-endian unless noted):
           header predictor big-endian), mono or stereo, or the block-coded "WVSM" variant,
           encoded here from generated signals (sines, chirps, noise, clipping, silence) with
           escapes and clamps placed on purpose.
+  IMC     music files: an "MCMP" container (big-endian) of raw and VIMA blocks holding an
+          "iMUS" header with its map (FRMT, TEXT, REGN, JUMP, STOP, SYNC) and the audio.
+  DLL     a PE32 file whose data section holds music tables in the layout the tool reads
+          (76-byte state and sequence records, 64-byte file records, generic keys).
 
   SHAPES  the level-geometry test vector: 14 abstract polygons on a 5 x 3 grid covering every UV
           symmetry, the texture rules, LINK entries, moving and hidden polygons, a two-sided,
@@ -33,8 +37,8 @@ Formats written (little-endian unless noted):
 
   damaged inputs: copies of the fixtures cut at structure boundaries or with one count, size or
           offset field overwritten (baf_mutants, lab_mutants, level_mutants, z_mutants,
-          voice_mutants), and files whose entry names try to leave the output folder
-          (unsafe_name_*).
+          voice_mutants, music_mutants, imuse_mutants), and files whose entry names try to
+          leave the output folder (unsafe_name_*).
 
 Besides the writers, the module holds independent models that the test runner compares the tool
 against:
@@ -45,8 +49,10 @@ against:
                          the name those files take for a level name;
   lab_outputs()          LAB extraction from the stored offsets and from the sequential read;
   is3_outputs()          the files a .Z archive holds;
-  wv_model()             the voice decoder, written from the format notes (independent of the
-                         tool's code; vima_decode_body() is its ADPCM reference), raising
+  wv_model(), imc_model(), imuse_model()
+                         the voice decoder, the music decoder with its map text, and the music
+                         table reader, written from the format notes (independent of the tool's
+                         code; vima_decode_body() is the shared ADPCM reference), each raising
                          SoundError at the offset the tool must name for a damaged file;
   lzss_decode(), dcl_explode(), walk_sections(): reference readers used by --self-test and by
                          the decompressor differential.
@@ -2543,13 +2549,13 @@ def level_geometry_files(image, name, scale=0.2, rule='game'):
     return {stem + '.obj': crlf(obj), stem + '.mtl': crlf(mtl)}
 
 
-# ============================================================================ sound: VIMA, voice files
+# ============================================================================ sound: VIMA, voice files, music files, music tables
 #
 # The game codes voice files (INDYWV) and music blocks (MCMP) with VIMA ADPCM. Below: the tables,
-# an independent model of the tool's voice reader (ported from the sound pass's reference
-# decoders; every check and error offset as sound.h and vima.h describe them), a test encoder,
-# and a writer for synthetic voice files. Signals are generated (sines, chirps, silence, noise,
-# full-scale squares); names are generic.
+# an independent model of the tool's three sound readers (ported from the sound pass's reference
+# decoders; every check and error offset as sound.h, vima.h and imuse.h describe them), a test
+# encoder, and writers for synthetic voice files, music files and music-table DLLs. Signals are
+# generated (sines, chirps, silence, noise, full-scale squares); names are generic.
 
 VIMA_STEP = (
     7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97,
@@ -2568,6 +2574,7 @@ VIMA_ADJUST = {
 }
 WVSM_BLOCK_BYTES = 0x1000
 SOUND_MAX_RATE = 384000
+IMUS_MAX_MAP = 0x2000 - 8
 WAV_HEADER = 44
 
 
@@ -3046,9 +3053,715 @@ def voice_mutants():
     return out
 
 
+# ---------------------------------------------------------------------------- music files (MCMP + iMUS)
+
+
+def _imus_event(tag, pos, values=(), text=None, data=b''):
+    if tag == 'TEXT':
+        body = struct.pack('>I', pos) + text + b'\0'
+    elif tag == 'SYNC':
+        body = struct.pack('>I', pos) + data
+    else:
+        body = struct.pack('>%dI' % (1 + len(values)), pos, *values)
+    return tag.encode('ascii') + struct.pack('>I', len(body)) + body
+
+
+def imus_header(events, frame_bytes, data_bytes, stream_size=None):
+    """The iMUS header for map events given in frames of the audio:
+    ('FRMT', frame, flag, bits, rate, channels), ('TEXT', frame, b'text'), ('REGN', frame, frames),
+    ('JUMP', frame, dest frame, hook, fade), ('STOP', frame), ('SYNC', frame, b'data'), and
+    ('RAW', bytes) for an event given as it is stored."""
+    def build(start):
+        out = b''
+        for e in events:
+            tag = e[0]
+            if tag == 'RAW':
+                out += e[1]
+                continue
+            pos = start + e[1] * frame_bytes
+            if tag == 'FRMT':
+                out += _imus_event(tag, pos, e[2:6])
+            elif tag == 'TEXT':
+                out += _imus_event(tag, pos, text=e[2])
+            elif tag == 'REGN':
+                out += _imus_event(tag, pos, (e[2] * frame_bytes,))
+            elif tag == 'JUMP':
+                out += _imus_event(tag, pos, (start + e[2] * frame_bytes, e[3], e[4]))
+            elif tag == 'STOP':
+                out += _imus_event(tag, pos)
+            elif tag == 'SYNC':
+                out += _imus_event(tag, pos, data=e[2])
+        return out
+    start = len(build(0)) + 24
+    events_bytes = build(start)
+    total = start + data_bytes
+    return (b'iMUS' + struct.pack('<I', (stream_size or total) - 8) + b'MAP ' + struct.pack('>I', len(events_bytes)) +
+            events_bytes + b'DATA' + struct.pack('>I', data_bytes))
+
+
+def make_imc(channels, events, block_bytes=8192, raw_split=None, names=b'NULL\0VIMA\0',
+             raw_codec=0, vima_codec=1, wvsm_blocks=(), restart_blocks=()):
+    """A music file: the iMUS header (raw blocks, split at `raw_split` sizes) and the audio of
+    `channels` (1 or 2 lists of samples) in VIMA blocks of `block_bytes` decoded bytes. Each block's
+    header holds the encoder state at its start (as the game's files do), except the blocks in
+    `restart_blocks`, which start from index 88 and the block's first sample; blocks in
+    `wvsm_blocks` are coded as WVSM. Returns (file bytes, the decoded interleaved samples)."""
+    nch = len(channels)
+    fb = 2 * nch
+    frames = len(channels[0])
+    head = imus_header(events, fb, frames * fb)
+    if raw_split is None:
+        raw_split = [len(head)]
+    raws, p = [], 0
+    for s in raw_split:
+        raws.append(head[p:p + s])
+        p += s
+    assert p == len(head)
+    per_block = block_bytes // fb
+    state = [(0, 0)] * nch
+    blocks, decoded = [], []
+    for b, start in enumerate(range(0, frames, per_block)):
+        part = [ch[start:start + per_block] for ch in channels]
+        n = len(part[0])
+        if b in wvsm_blocks and nch == 2:
+            inter = [x for pair in zip(part[0], part[1]) for x in pair]
+            data, dec = wvsm_encode(inter, n * fb, shifts=((2, 4),), seed=b)
+            dec = dec[:n * 2]
+            state = [(0, part[0][-1]), (0, part[1][-1])]
+        else:
+            if b in restart_blocks:
+                state = [(88, part[c][0]) for c in range(nch)]
+            pb = [(((s[1] & 0xFFFF) >> 8), s[1] & 0xFF) for s in state]
+            data, dec, final, _ = vima_encode(part, False, [s[0] for s in state] + [0] * (2 - nch),
+                                              pb + [(0, 0)] * (2 - nch), seed=b + 3)
+            state = final
+        blocks.append((vima_codec, n * fb, data))
+        decoded += dec
+    entries = [(raw_codec, len(r), r) for r in raws] + blocks
+    out = bytearray(b'MCMP' + struct.pack('>H', len(entries)))
+    for codec, dsize, data in entries:
+        out += struct.pack('>BII', codec, dsize, len(data))
+    out += struct.pack('>H', len(names)) + names
+    for _, _, data in entries:
+        out += data
+    return bytes(out), decoded
+
+
+def _mcmp_layout(data):
+    """(block count, [(entry offset, codec, decoded, stored, stored offset)], data0) of a file the
+    writer made (no checks)."""
+    n = struct.unpack_from('>H', data, 4)[0]
+    nsz = struct.unpack_from('>H', data, 6 + 9 * n)[0]
+    p = 8 + 9 * n + nsz
+    ents = []
+    for i in range(n):
+        c, d, s = struct.unpack_from('>BII', data, 6 + 9 * i)
+        ents.append((6 + 9 * i, c, d, s, p))
+        p += s
+    return n, ents, 8 + 9 * n + nsz
+
+
+def imc_model(data, label):
+    """The music reader (imc_decode) and the map text: {'rate', 'channels', 'samples', 'text',
+    'warnings': [(offset, kind)]} or SoundError. Mirrors every check of sound.cpp in its order."""
+    size = len(data)
+    if size < 4 or data[:4] != b'MCMP':
+        raise SoundError(0, 'not an MCMP music file')
+    _need(data, 4, 2, 0, 'bytes')
+    n = struct.unpack_from('>H', data, 4)[0]
+    if n == 0:
+        raise SoundError(4, 'no blocks')
+    if 6 + 9 * n + 2 > size:
+        raise SoundError(4, 'block table past the end')
+    names_at = 6 + 9 * n
+    nsz = struct.unpack_from('>H', data, names_at)[0]
+    if names_at + 2 + nsz > size:
+        raise SoundError(names_at, 'name table past the end')
+    names, i, table = [], 0, data[names_at + 2:names_at + 2 + nsz]
+    while i < nsz:
+        e = table.find(b'\0', i)
+        if e < 0:
+            raise SoundError(names_at + 2 + i, 'codec name not terminated')
+        names.append(table[i:e])
+        i = e + 1
+    data0 = names_at + 2 + nsz
+    blocks, at = [], data0
+    for k in range(n):
+        eo = 6 + 9 * k
+        codec, dec, sto = struct.unpack_from('>BII', data, eo)
+        if codec >= len(names):
+            raise SoundError(eo, 'codec index')
+        cn = names[codec]
+        if cn not in (b'VIMA', b'NULL', b'NONE'):
+            raise SoundError(eo, 'codec name')
+        if at + sto > size:
+            raise SoundError(eo, 'block past the end')
+        blocks.append({'entry': eo, 'vima': cn == b'VIMA', 'dec': dec, 'sto': sto, 'at': at})
+        at += sto
+    if at != size:
+        raise SoundError(at, 'bytes after the last block')
+    hb, audio, seen = 0, 0, False
+    for b in blocks:
+        if b['vima']:
+            seen = True
+            audio += b['dec']
+            continue
+        if seen:
+            raise SoundError(b['entry'], 'raw block after VIMA')
+        if b['dec'] != b['sto']:
+            raise SoundError(b['entry'], 'raw block sizes')
+        hb += b['sto']
+    if hb == 0:
+        raise SoundError(6, 'no raw header block')
+    h = data[data0:data0 + hb]
+    if h[:4] != b'iMUS':
+        raise SoundError(data0, 'no iMUS')
+    if hb < 16:
+        raise SoundError(data0 + hb, 'iMUS header ends before its map')
+    if h[8:12] != b'MAP ':
+        raise SoundError(data0 + 8, 'no MAP')
+    map_size = struct.unpack_from('>I', h, 12)[0]
+    if map_size > IMUS_MAX_MAP:
+        raise SoundError(data0 + 12, 'map too large')
+    if map_size + 24 > hb:
+        raise SoundError(data0 + 12, 'map past the raw blocks')
+    data_at = 16 + map_size
+    if h[data_at:data_at + 4] != b'DATA':
+        raise SoundError(data0 + data_at, 'no DATA')
+    data_bytes = struct.unpack_from('>I', h, data_at + 4)[0]
+    start = map_size + 24
+    if start != hb:
+        raise SoundError(data0 + data_at, 'audio start')
+    events, p = [], 16
+    while p < data_at:
+        if data_at - p < 8:
+            raise SoundError(data0 + p, 'event header past the map')
+        tag = h[p:p + 4].split(b'\0')[0].decode('latin-1')
+        esize = struct.unpack_from('>I', h, p + 4)[0]
+        body = p + 8
+        left = data_at - body
+        ev = {'tag': tag, 'offset': data0 + p, 'values': [0, 0, 0, 0], 'text': b'', 'data': 0}
+        if tag == 'TEXT':
+            if left < 5:
+                raise SoundError(data0 + p, 'TEXT past the map')
+            ev['pos'] = struct.unpack_from('>I', h, body)[0]
+            e = h.find(b'\0', body + 4, data_at)
+            if e < 0:
+                raise SoundError(data0 + p, 'TEXT not terminated')
+            ev['text'] = h[body + 4:e]
+            events.append(ev)
+            p = e + 1
+            continue
+        need = {'FRMT': 5, 'REGN': 2, 'JUMP': 4, 'STOP': 1, 'SYNC': 1}.get(tag)
+        if need is None:
+            raise SoundError(data0 + p, 'unknown event')
+        words = esize >> 2
+        if words < need:
+            raise SoundError(data0 + p, 'event too short')
+        if words * 4 > left:
+            raise SoundError(data0 + p, 'event past the map')
+        vals = struct.unpack_from('>%dI' % need, h, body)
+        ev['pos'] = vals[0]
+        ev['values'][:need - 1] = vals[1:]
+        if tag == 'SYNC':
+            ev['data'] = words * 4 - 4
+        events.append(ev)
+        p = body + words * 4
+    if not events or events[0]['tag'] != 'FRMT' or events[0]['pos'] != hb:
+        raise SoundError(data0 + 16, 'first event not FRMT')
+    f = events[0]
+    flag, bits, rate, ch = f['values']
+    if bits != 16:
+        raise SoundError(f['offset'], 'FRMT bits')
+    if rate == 0 or rate > SOUND_MAX_RATE:
+        raise SoundError(f['offset'], 'FRMT rate')
+    if ch not in (1, 2):
+        raise SoundError(f['offset'], 'FRMT channels')
+    warnings = [(f['offset'], 'byteorder')] if flag == 0 else []
+    fb = 2 * ch
+    end = hb + data_bytes
+    prev = 0
+    for k, e in enumerate(events):
+        if e['pos'] < hb or e['pos'] > end:
+            raise SoundError(e['offset'], 'position outside the audio')
+        if k and e['pos'] < prev:
+            raise SoundError(e['offset'], 'position goes backwards')
+        if (e['pos'] - hb) % fb:
+            raise SoundError(e['offset'], 'position off the frame grid')
+        prev = e['pos']
+        if e['tag'] == 'FRMT' and k and e['values'][1:4] != f['values'][1:4]:
+            raise SoundError(e['offset'], 'second FRMT')
+        if e['tag'] == 'REGN' and (e['values'][0] % fb or e['pos'] + e['values'][0] > end):
+            raise SoundError(e['offset'], 'region')
+        if e['tag'] == 'JUMP':
+            d = e['values'][0]
+            if d < hb or d >= end or (d - hb) % fb:
+                raise SoundError(e['offset'], 'jump destination')
+    lps = [e['pos'] for e in events if e['tag'] == 'TEXT' and e['text'] == b'lp']
+    for e in events:
+        if e['tag'] != 'JUMP':
+            continue
+        d = e['values'][0]
+        if not any(x['tag'] == 'REGN' and x['pos'] == d for x in events):
+            raise SoundError(e['offset'], 'no region at the jump destination')
+        if lps and d not in lps:
+            raise SoundError(e['offset'], 'jump destination is not the loop point')
+    if data_bytes % fb:
+        raise SoundError(data0 + data_at + 4, 'DATA not whole frames')
+    if audio != data_bytes:
+        raise SoundError(data0 + data_at + 4, 'DATA size differs from the VIMA blocks')
+    samples = []
+    for k, b in enumerate(blocks):
+        if not b['vima']:
+            continue
+        blk = data[b['at']:b['at'] + b['sto']]
+        hd, pos = vima_read_header(blk, 0, b['at'], quirk=False)
+        if hd['channels'] != ch:
+            raise SoundError(b['at'], 'block channels')
+        if b['dec'] % fb:
+            raise SoundError(b['entry'], 'block not whole frames')
+        if vima_requested(hd, b['dec']) > vima_room(hd, len(blk) - pos):
+            raise SoundError(b['entry'], 'block cannot hold its samples')
+        part, _ = vima_decode_body(blk, pos, b['at'], hd, b['dec'])
+        samples += part
+    text = imc_map_lines(events, hb, data_bytes, rate, ch, label)
+    return {'rate': rate, 'channels': ch, 'samples': samples, 'text': text, 'warnings': warnings}
+
+
+def sound_printable(b):
+    """Bytes other than printable ASCII, '"' and '\\' as \\xNN (the tool's quoting)."""
+    if isinstance(b, str):
+        b = b.encode('latin-1')
+    return ''.join(chr(c) if 0x20 <= c < 0x7F and c not in (0x22, 0x5C) else '\\x%02X' % c for c in b)
+
+
+def imc_map_lines(events, hb, data_bytes, rate, ch, label):
+    fb = 2 * ch
+    out = ['# iMUSE map of %s, written by TPMExtractor (fork)' % sound_printable(label),
+           '# Positions are frames of the audio: (byte position in the decoded stream - header bytes) / frame bytes.',
+           'format\tframes=%d\trate=%d\tchannels=%d\tbits=16\tframe_bytes=%d\theader_bytes=%d'
+           % (data_bytes // fb, rate, ch, fb, hb),
+           '# event\tframe\tvalues']
+    for e in events:
+        line = '%s\t%d' % (e['tag'], (e['pos'] - hb) // fb)
+        v = e['values']
+        if e['tag'] == 'FRMT':
+            line += '\tflag=%d\tbits=%d\trate=%d\tchannels=%d' % tuple(v)
+        elif e['tag'] == 'TEXT':
+            line += '\ttext="%s"' % sound_printable(e['text'])
+        elif e['tag'] == 'REGN':
+            line += '\tframes=%d' % (v[0] // fb)
+        elif e['tag'] == 'JUMP':
+            line += '\tdest=%d\thook=%d\tfade_ms=%d' % ((v[0] - hb) // fb, v[1], v[2])
+        elif e['tag'] == 'SYNC':
+            line += '\tbytes=%d' % e['data']
+        out.append(line)
+    return '\n'.join(out) + '\n'
+
+
+def imc_expected(data, file_name):
+    """{'<file>.wav': bytes, '<file>.imap.txt': bytes} the tool writes for a music file, or SoundError."""
+    m = imc_model(data, file_name)
+    stem = sound_stem(file_name)
+    return {stem + '.wav': wav_bytes(m['rate'], m['channels'], m['samples']), stem + '.imap.txt': crlf(m['text'])}
+
+
 def sound_stem(file_name):
     """A sound file's name without its extension (from the last '.')."""
     return file_name.rsplit('.', 1)[0] if '.' in file_name else file_name
+
+
+def _track_events(kind, frames, banner=b'*' * 24, name=b'track', fade=500, sync=False):
+    """Map events of the three forms the game's music has: 'loop' (intro, loop, tail), 'end' (a
+    one-shot with an "_end" marker), 'plain'."""
+    ev = [('FRMT', 0, 1, 16, 22050, 2), ('TEXT', 0, name), ('TEXT', 0, banner)]
+    if kind == 'loop':
+        lp, j = frames // 7, frames - frames // 9
+        ev += [('REGN', 0, lp), ('TEXT', lp, b'lp'), ('REGN', lp, j - lp), ('JUMP', j, lp, 0, fade),
+               ('REGN', j, frames - j)]
+    elif kind == 'end':
+        e = frames - frames // 5
+        ev += [('REGN', 0, e), ('TEXT', e, b'_end'), ('REGN', e, frames - e)]
+    else:
+        ev += [('REGN', 0, frames)]
+    if sync:
+        ev.insert(3, ('SYNC', 0, struct.pack('>II', 2, 0x01020304)))
+    return ev + [('STOP', frames)]
+
+
+def _frmt(ev, rate, ch):
+    return [('FRMT', 0, 1, 16, rate, ch)] + ev[1:]
+
+
+def music_fixtures():
+    """[(name, file bytes, decoded samples)]: the three forms of the game's tracks, mono and
+    stereo, raw headers in one or two blocks, restarted and WVSM blocks, and the edge cases."""
+    fx = []
+    n = 2048 * 3 + 517
+    left, right = sig_sine(n, 100.0, 9000), sig_chirp(n, 80.0, 6000.0, 14000)
+    data, dec = make_imc([left, right], _track_events('loop', n, name=b'track_a'))
+    fx.append(('loop.imc', data, dec))
+    n2 = 2048 * 2 + 1000
+    data, dec = make_imc([sig_noise(n2, 21, 12000), sig_sine(n2, 41.0, 20000)],
+                         _track_events('end', n2, name=b'track_b'))
+    fx.append(('oneshot.imc', data, dec))
+    n3 = 4096 + 300                                   # mono: 4,096 frames per 8,192-byte block
+    data, dec = make_imc([sig_chirp(n3, 40.0, 3000.0, 25000, 11025.0)],
+                         _frmt(_track_events('plain', n3, name=b'track_c'), 11025, 1))
+    fx.append(('plain.imc', data, dec))
+    n4 = 2048 + 700
+    ev = _track_events('loop', n4, name=b'track_d', sync=True, fade=200)
+    head = imus_header(ev, 4, n4 * 4)
+    data, dec = make_imc([sig_square(n4, 64), sig_noise(n4, 9, 32767)], ev, raw_split=[40, len(head) - 40],
+                         names=b'NONE\0VIMA\0', restart_blocks=(1,))
+    fx.append(('rawsplit.imc', data, dec))
+    n5 = 2048 * 2 + 64
+    data, dec = make_imc([sig_sine(n5, 30.0, 4096), sig_sine(n5, 45.0, 8192)], _track_events('end', n5, name=b'w'),
+                         wvsm_blocks=(1,))
+    fx.append(('wvsm.imc', data, dec))
+    n6 = 2048 * 2 + 1                                 # a last block of one frame
+    data, dec = make_imc([[0] * n6, sig_mix([0] * 2048, sig_noise(n6 - 2048, 4))],
+                         _track_events('plain', n6, name=b'edge'))
+    fx.append(('edge.imc', data, dec))
+    return fx
+
+
+def music_mutants():
+    """Damaged copies of music fixtures: [(name, bytes)]; the model gives each one's outcome."""
+    fx = {n: d for n, d, _ in music_fixtures()}
+    loop = fx['loop.imc']
+    n, ents, data0 = _mcmp_layout(loop)
+    hb = ents[0][3]
+    map_size = struct.unpack_from('>I', loop, data0 + 12)[0]
+    ev0 = data0 + 16
+    out = [('imc_' + k, d) for k, d in _cuts(loop, [0, 3, 5, 6 + 9 * n - 1, 6 + 9 * n + 3, data0 + 10,
+                                                   ents[1][4] + 3, ents[2][4] + ents[2][3] // 2, len(loop) - 1])]
+    out += [('imc_%s' % k, _put16(loop, off, v)) for k, off, v in [('nzero', 4, 0), ('nhuge', 4, 0xFFFF)]]
+
+    def patch(name, off, raw):
+        b = bytearray(loop)
+        b[off:off + len(raw)] = raw
+        out.append(('imc_' + name, bytes(b)))
+
+    def be32(name, off, value):
+        patch(name, off, struct.pack('>I', value & 0xFFFFFFFF))
+    data_size = struct.unpack_from('>I', loop, data0 + 20 + map_size)[0]
+    be32('rawdec', ents[0][0] + 1, hb + 4)
+    be32('storedhuge', ents[2][0] + 5, HUGE)
+    be32('mapsize', data0 + 12, 0x1FFF)
+    be32('mapsmall', data0 + 12, map_size - 8)
+    be32('datasize', data0 + 20 + map_size, data_size + 4)
+    be32('datapart', data0 + 20 + map_size, data_size + 2)
+    patch('codecidx', ents[1][0], b'\x07')
+    patch('codecname', 6 + 9 * n + 2, b'XXXX')
+    patch('imus', data0, b'iMUZ')
+    patch('maptag', data0 + 8, b'MAQ ')
+    patch('datatag', data0 + 16 + map_size, b'DATB')
+    patch('frmtbits', ev0 + 8 + 8, struct.pack('>I', 8))
+    patch('frmtrate', ev0 + 8 + 12, struct.pack('>I', 0))
+    patch('frmtchan', ev0 + 8 + 16, struct.pack('>I', 3))
+    patch('frmtpos', ev0 + 8, struct.pack('>I', hb + 4))
+    patch('frmtflag0', ev0 + 8 + 4, struct.pack('>I', 0))           # valid, with a warning
+    patch('unknown', ev0, b'BOGU')
+    # the events after FRMT and the two TEXTs: REGN, TEXT(lp), REGN, JUMP, REGN, STOP
+    evs = []
+    p = ev0
+    while p < data0 + 16 + map_size:
+        tag = loop[p:p + 4]
+        size = struct.unpack_from('>I', loop, p + 4)[0]
+        evs.append((tag, p, size))
+        p += 8 + size
+    by = {}
+    for tag, p, size in evs:
+        by.setdefault(tag, []).append(p)
+    regn, jump, text = by[b'REGN'], by[b'JUMP'][0], by[b'TEXT']
+    stop = by[b'STOP'][0]
+    patch('regnlen', regn[1] + 12, struct.pack('>I', struct.unpack_from('>I', loop, regn[1] + 12)[0] + 2))
+    patch('regnpast', regn[2] + 12, struct.pack('>I', struct.unpack_from('>I', loop, regn[2] + 12)[0] + 4))
+    patch('jumpregion', jump + 12, struct.pack('>I', struct.unpack_from('>I', loop, jump + 12)[0] + 4))
+    patch('jumplp', jump + 12, struct.pack('>I', hb))           # to the first region, not the loop point
+    patch('jumpoff', jump + 12, struct.pack('>I', struct.unpack_from('>I', loop, jump + 12)[0] + 2))
+    patch('stopback', stop + 8, struct.pack('>I', hb))           # STOP before the events it follows
+    patch('stoppast', stop + 8, struct.pack('>I', hb + 4 * 100000))
+    patch('textnul', text[2] + 14, b'\x41')                       # "lp" loses its NUL: the walk goes astray
+    patch('textname', text[2] + 13, b'\x41')                      # "lp" becomes "lA": no loop point, still valid
+    map_end = data0 + 16 + map_size
+    patch('textlong', text[0] + 12, b'\x41' * (map_end - text[0] - 12))   # a text not ended inside the map
+    blk1 = ents[1][4]
+    patch('blockmono', blk1, b'\x00')                             # a mono block in a stereo track
+    patch('blockindex', blk1, b'\x9B')                            # step index 100
+    patch('blockindex1', blk1 + 3, b'\x80')                       # channel 1's step index -128
+    out.append(('imc_trailing', loop + b'\0\0\0'))
+    entries = bytearray(loop)
+    struct.pack_into('>I', entries, ents[2][0] + 1, ents[2][2] + 2)  # a block of part frames
+    struct.pack_into('>I', entries, ents[3][0] + 1, ents[3][2] - 2)
+    out.append(('imc_partframes', bytes(entries)))
+    big = bytearray(loop)
+    struct.pack_into('>I', big, ents[1][0] + 1, ents[1][3] * 4 + 8)   # more samples than its codes hold
+    struct.pack_into('>I', big, data0 + 20 + map_size, struct.unpack_from('>I', big, data0 + 20 + map_size)[0]
+                     + ents[1][3] * 4 + 8 - ents[1][2])
+    out.append(('imc_blockroom', bytes(big)))
+    short = bytearray(loop)
+    s2 = ents[2][3] - 40                                  # a block cut short, the file kept consistent
+    struct.pack_into('>I', short, ents[2][0] + 5, s2)
+    del short[ents[2][4] + s2:ents[2][4] + ents[2][3]]
+    out.append(('imc_blockshort', bytes(short)))
+    order = bytearray(loop)                               # the last block stored raw, after VIMA blocks
+    struct.pack_into('>BI', order, ents[-1][0], 0, ents[-1][3])
+    out.append(('imc_rawafter', bytes(order)))
+    vima = bytearray(loop)                                # the first block coded VIMA: no raw header
+    struct.pack_into('>B', vima, ents[0][0], 1)
+    out.append(('imc_noheader', bytes(vima)))
+    out.append(('imc_shorthead', b'MCMP' + struct.pack('>HBIIH', 1, 0, 8, 8, 10) + b'NULL\0VIMA\0' + b'iMUS\0\0\0\0'))
+    return out
+
+
+# ---------------------------------------------------------------------------- music tables (IMUSE.DLL)
+
+IMUSE_COUNTS = (87, 82, 167)
+
+
+def _imuse_rec(key, trans, ident, sym, attrib=0, hook=0, fade=0):
+    return (name_bytes(key, 32) + struct.pack('<II', trans, ident) + name_bytes(sym, 24) +
+            struct.pack('<III', attrib, hook, fade))
+
+
+def imuse_tables_spec(counts=IMUSE_COUNTS):
+    """Generic records: (states, sequences, files) with keys area<n>/cue<n> and files <KEY>.IMC.
+    One state's key differs in letter case from its file key (the engine's lookup is byte for byte)."""
+    ns, nq, nf = counts
+    files = [('area%03d' % i, 'AREA%03d.IMC' % i) for i in range(ns - 1)]
+    files += [('cue%03d' % i, 'CUE%03d.IMC' % i) for i in range(nf - len(files))]
+    states = [('', 0, 1000, 'state_none', 0)]
+    for i in range(1, ns):
+        key = 'area%03d' % (i - 1)
+        if i == 11:
+            key = 'Area%03d' % (i - 1)
+        states.append((key, 3 if i % 13 else 0, 1000 + 5 * i, 'stateArea%03d' % i, 1 if i in (40, 41) else 0))
+    seqs = [('', 0, 2000, 'sequence_none', 0)]
+    for i in range(1, nq):
+        seqs.append(('cue%03d' % (i - 1) if i < nf - ns + 1 else '', 4 if i % 3 else 3, 2000 + 10 * i,
+                     'seqCue%03d' % i, 0))
+    return states, seqs, files
+
+
+def make_imuse_dll(states=None, seqs=None, files=None, gap=4, decoy=True, lead=64):
+    """A minimal PE32 DLL whose .data section holds the music tables: `lead` bytes of other data
+    (with a decoy record that looks like the null state but is not followed by a record), the
+    state table, `gap` zero bytes, the sequence table, the file table and its empty end record.
+    Returns (bytes, {'state', 'sequence', 'file': file offsets})."""
+    if states is None:
+        states, seqs, files = imuse_tables_spec()
+    data = bytearray()
+    lead_bytes = bytearray(b'generic data, not a table\0' + bytes(lead))[:lead]
+    data += lead_bytes
+    if decoy:
+        data += _imuse_rec('', 0, 1000, 'decoy_none') + b'\xEE' * 76
+    st_at = len(data)
+    for k, t, i, s, a in states:
+        data += _imuse_rec(k, t, i, s, a)
+    data += bytes(gap)
+    sq_at = len(data)
+    for k, t, i, s, a in seqs:
+        data += _imuse_rec(k, t, i, s, a)
+    f_at = len(data)
+    for k, f in files:
+        data += name_bytes(k, 32) + name_bytes(f, 32)
+    data += bytes(64) + b'other data after the tables\0'
+    while len(data) % 0x200:
+        data.append(0)
+    text = b'\xC3' + bytes(0x1FF)
+    raw_text, raw_data = 0x400, 0x600
+    head = bytearray(0x400)
+    head[0:2] = b'MZ'
+    struct.pack_into('<I', head, 0x3C, 0x80)
+    head[0x80:0x84] = b'PE\0\0'
+    struct.pack_into('<HHIIIHH', head, 0x84, 0x14C, 2, 0, 0, 0, 224, 0x2102)
+    opt = 0x98
+    struct.pack_into('<H', head, opt, 0x10B)
+    struct.pack_into('<I', head, opt + 28, 0x10000000)
+    sec = opt + 224
+    struct.pack_into('<8sIIIIIIHHI', head, sec, b'.text', 0x200, 0x1000, 0x200, raw_text, 0, 0, 0, 0, 0x60000020)
+    struct.pack_into('<8sIIIIIIHHI', head, sec + 40, b'.data', len(data), 0x2000, len(data), raw_data, 0, 0, 0, 0,
+                     0xC0000040)
+    out = bytes(head) + text + bytes(data)
+    return out, {'state': raw_data + st_at, 'sequence': raw_data + sq_at, 'file': raw_data + f_at}
+
+
+def _field(b, n, allow_empty):
+    e = b.find(b'\0', 0, n)
+    if e < 0 or (e == 0 and not allow_empty):
+        return None
+    if any(c < 0x20 or c > 0x7E for c in b[:e]) or any(b[e:n]):
+        return None
+    return b[:e].decode('ascii')
+
+
+def _music_rec(b):
+    if len(b) < 76:
+        return None
+    key, sym = _field(b[0:32], 32, True), _field(b[40:64], 24, False)
+    trans, ident, attrib, hook, fade = struct.unpack_from('<II', b, 32) + struct.unpack_from('<III', b, 64)
+    if key is None or sym is None or trans > 12 or attrib > 0xFFFF or hook > 0xFFFF or fade > 0xFFFF:
+        return None
+    return (key, trans, ident, sym, attrib, hook, fade)
+
+
+def _file_rec(b):
+    if len(b) < 64:
+        return None
+    k, f = _field(b[0:32], 32, False), _field(b[32:64], 32, False)
+    return None if k is None or f is None else (k, f)
+
+
+def imuse_model(data, label):
+    """The music-table reader (imuse_read_tables) and its text, or SoundError."""
+    size = len(data)
+    if data[:2] != b'MZ':
+        raise SoundError(0, 'no MZ')
+    _need(data, 0x3C, 4, 0)
+    pe = struct.unpack_from('<I', data, 0x3C)[0]
+    if pe + 24 > size:
+        raise SoundError(0x3C, 'PE offset')
+    if data[pe:pe + 4] != b'PE\0\0':
+        raise SoundError(pe, 'no PE')
+    nsec, = struct.unpack_from('<H', data, pe + 6)
+    optsz, = struct.unpack_from('<H', data, pe + 20)
+    opt = pe + 24
+    _need(data, opt, 2, 0)
+    magic, = struct.unpack_from('<H', data, opt)
+    if magic == 0x10B:
+        _need(data, opt + 28, 4, 0)
+        base, = struct.unpack_from('<I', data, opt + 28)
+    elif magic == 0x20B:
+        _need(data, opt + 24, 8, 0)
+        base, = struct.unpack_from('<Q', data, opt + 24)
+    else:
+        raise SoundError(opt, 'optional header')
+    if nsec == 0 or nsec > 96:
+        raise SoundError(pe + 6, 'sections')
+    table = opt + optsz
+    if table + nsec * 40 > size:
+        raise SoundError(pe + 6, 'section table')
+    secs = []
+    for i in range(nsec):
+        va, rs, rp = struct.unpack_from('<III', data, table + 40 * i + 12)
+        chars, = struct.unpack_from('<I', data, table + 40 * i + 36)
+        secs.append({'va': va, 'raw': min(rp, size), 'end': min(rp + rs, size), 'chars': chars})
+
+    def find(ident):
+        found = []
+        for s in secs:
+            if not s['chars'] & 0x40 or s['end'] < s['raw'] + 152:
+                continue
+            o = (s['raw'] + 3) & ~3
+            while o + 152 <= s['end']:
+                r = _music_rec(data[o:o + 76])
+                if (r and not any(data[o:o + 32]) and r[1] == 0 and r[2] == ident and r[4:] == (0, 0, 0)
+                        and _music_rec(data[o + 76:o + 152])):
+                    found.append((o, s))
+                o += 4
+        if not found:
+            raise SoundError(0, 'no table')
+        if len(found) > 1:
+            raise SoundError(found[1][0], 'several candidates')
+        return found[0]
+    st, ssec = find(1000)
+    sq, qsec = find(2000)
+    if qsec is not ssec or sq < st + 76:
+        raise SoundError(sq, 'sequence table does not follow')
+    end = ssec['end']
+    states, o = [], st
+    while o + 76 <= sq and _music_rec(data[o:o + 76]):
+        states.append(_music_rec(data[o:o + 76]))
+        o += 76
+    if sq - o >= 76:
+        raise SoundError(o, 'bad state record')
+    for k in range(o, sq):
+        if data[k]:
+            raise SoundError(k, 'gap not zero')
+    seqs, o = [], sq
+    while True:
+        if o + 64 <= end and _file_rec(data[o:o + 64]):
+            break
+        if o + 76 > end or not _music_rec(data[o:o + 76]):
+            raise SoundError(o, 'bad sequence record')
+        seqs.append(_music_rec(data[o:o + 76]))
+        o += 76
+    f_at = o
+    files = []
+    while True:
+        if o + 64 > end:
+            raise SoundError(o, 'file table not ended')
+        if data[o] == 0:
+            break
+        r = _file_rec(data[o:o + 64])
+        if not r:
+            raise SoundError(o, 'bad file record')
+        files.append(r)
+        o += 64
+    for got, want, at in ((len(states), 87, st), (len(seqs), 82, sq), (len(files), 167, f_at)):
+        if got != want:
+            raise SoundError(at, 'count')
+
+    def addr(off):
+        return base + ssec['va'] + (off - ssec['raw'])
+    keys = [k for k, _ in files]
+
+    def resolve(key):
+        return -1 if not key or key not in keys else keys.index(key)
+    unmatched = sum(1 for r in states + seqs if r[0] and resolve(r[0]) < 0)
+    out = ['# iMUSE music tables of %s, written by TPMExtractor (fork)' % sound_printable(label),
+           '# states: %d records at file offset 0x%X (address 0x%X)' % (len(states), st, addr(st)),
+           '# sequences: %d records at file offset 0x%X (address 0x%X)' % (len(seqs), sq, addr(sq)),
+           '# files: %d records at file offset 0x%X (address 0x%X)' % (len(files), f_at, addr(f_at)),
+           '# transition: 0 none, 3 crossfade into the file, 4 crossfade, then back to the state at the file\'s '
+           '_end marker',
+           '# file: the file record whose key equals the record\'s key byte for byte, as the engine looks keys up; '
+           '- for none',
+           '# records with a key that matches no file key byte for byte: %d' % unmatched,
+           '# table\tindex\tid\ttransition\tattribute\thook\tfade\tkey\tsymbol\tfile']
+    for name, recs in (('state', states), ('sequence', seqs)):
+        for i, (key, trans, ident, sym, attrib, hook, fade) in enumerate(recs):
+            f = resolve(key)
+            out.append('%s\t%d\t%d\t%d\t%d\t%d\t%d\t"%s"\t"%s"\t%s' % (
+                name, i, ident, trans, attrib, hook, fade, sound_printable(key), sound_printable(sym),
+                '-' if f < 0 else '"%s"' % sound_printable(files[f][1])))
+    out.append('# table\tindex\tkey\tfile')
+    for i, (k, f) in enumerate(files):
+        out.append('file\t%d\t"%s"\t"%s"' % (i, sound_printable(k), sound_printable(f)))
+    return '\n'.join(out) + '\n', {'states': len(states), 'sequences': len(seqs), 'files': len(files),
+                                  'unmatched': unmatched}
+
+
+def imuse_mutants():
+    """Damaged and wrong music-table DLLs: [(name, bytes)]; the model gives each one's outcome."""
+    states, seqs, files = imuse_tables_spec()
+    good, at = make_imuse_dll()
+    out = [('dll_short_states', make_imuse_dll(states[:-1], seqs, files)[0]),
+           ('dll_more_files', make_imuse_dll(states, seqs, files + [('extra', 'EXTRA.IMC')])[0]),
+           ('dll_gap8', make_imuse_dll(states, seqs, files, gap=8)[0]),
+           ('dll_gap80', make_imuse_dll(states, seqs, files, gap=80)[0]),
+           ('dll_nodecoy', make_imuse_dll(decoy=False)[0])]
+    out += [('dll_' + k, d) for k, d in _cuts(good, [0, 1, 0x3D, 0x90, 0x100, at['state'] + 76 * 40,
+                                                     at['file'] + 64 * 100])]
+    def patch(name, off, raw):
+        b = bytearray(good)
+        b[off:off + len(raw)] = raw
+        out.append(('dll_' + name, bytes(b)))
+    patch('mz', 0, b'XZ')
+    patch('peoff', 0x3C, struct.pack('<I', 0x7FFFFFF0))
+    patch('pesig', 0x80, b'PX')
+    patch('magic', 0x98, b'\x00\x00')
+    patch('nsec', 0x86, struct.pack('<H', 200))
+    patch('trans', at['state'] + 76 * 30 + 32, struct.pack('<I', 99))
+    patch('symbol', at['sequence'] + 76 * 20 + 40, b'\x01')
+    patch('filekey', at['file'] + 64 * 50, b'\x7F')
+    patch('gapbyte', at['sequence'] - 2, b'\x01')
+    patch('secondnull', at['state'] + 76 * 5, _imuse_rec('', 0, 1000, 'AGAIN'))
+    patch('nonull', at['sequence'] + 36, struct.pack('<I', 2001))
+    patch('initflag', 0x98 + 224 + 40 + 36, struct.pack('<I', 0xC0000020))
+    return out
 
 
 # ============================================================================ LAB contents and the synthetic disc
@@ -3108,6 +3821,12 @@ def voice_lab_entries():
             ('Line3.Wv', 'BSND', fx['wvsm.wv'])]
 
 
+def disc_music_files():
+    """The music folder of the synthetic disc: [(file name, bytes)] (lower-case names, so that a
+    lower-case copy of the disc gives the same output names)."""
+    return [(n, d) for n, d, _ in music_fixtures() if n in ('loop.imc', 'oneshot.imc', 'plain.imc')]
+
+
 def sound_lab_entries():
     """A LAB with voice files among other entries: a damaged voice file, a voice file whose WAV
     name the archive also uses, and a name that only looks like a voice file."""
@@ -3126,13 +3845,14 @@ def write_file(path, data):
         f.write(data)
 
 
-def write_disc(root, levels=None, voice=True, big_members=None):
+def write_disc(root, levels=None, voice=True, big_members=None, music=None):
     """Writes a synthetic disc under `root` and returns a description of it:
        GAMEDATA/GOBS/BIG.Z (big.lab inside), GAMEDATA/GOBS/LOCALIZE.LAB, optionally
        GAMEDATA/GOBS/VOICE.LAB, and GAMEDATA/LEVEL/<file> for each (file, level spec) or
        (file, level spec, compressed) in `levels` (default: the compressed BOX.B3D and
-       FLAT.B3D). The description maps each level file name to (file bytes, decompressed
-       image)."""
+       FLAT.B3D), and with `music` (a folder relative to the root, e.g. "MUSIC") the
+       disc_music_files there. The description maps each level file name to (file bytes,
+       decompressed image)."""
     big = make_lab(big_lab_entries())
     members = big_members or [{'path': 'big.lab', 'data': big, 'method': 'implode', 'dict_bits': 6}]
     write_file(os.path.join(root, 'GAMEDATA', 'GOBS', 'BIG.Z'), make_is3(members))
@@ -3153,7 +3873,11 @@ def write_disc(root, levels=None, voice=True, big_members=None):
         write_file(os.path.join(root, 'GAMEDATA', 'LEVEL', fname), data)
         imgs[fname] = image
         files[fname] = (data, image)
-    return {'big_lab': big, 'localize': loc, 'voice': voice_lab, 'levels': imgs, 'level_files': files}
+    music_files = disc_music_files() if music else []
+    for name, data in music_files:
+        write_file(os.path.join(root, music, name), data)
+    return {'big_lab': big, 'localize': loc, 'voice': voice_lab, 'levels': imgs, 'level_files': files,
+            'music': music_files}
 
 
 def multi_z_members():
@@ -3530,7 +4254,16 @@ def self_test():
             for k in totals:
                 totals[k] += st.get(k, 0)
     check(totals['escapes'] > 100 and totals['clamps'] > 10, 'voice fixtures exercise escapes and clamps %r' % totals)
-    for gen, model in ((voice_mutants, lambda d: wv_model(d)),):
+    for name, data, dec in music_fixtures():
+        m = imc_model(data, name)
+        check(m['samples'] == dec, 'music %s: the model does not decode what the encoder meant' % name)
+        check(m['text'].count('\n') >= 8 and not m['warnings'], 'music %s: map text' % name)
+    dll, at = make_imuse_dll()
+    text, counts = imuse_model(dll, 'IMUSE.DLL')
+    check(counts == {'states': 87, 'sequences': 82, 'files': 167, 'unmatched': 1}, 'music tables %r' % counts)
+    check('state\t0\t1000\t0\t0\t0\t0\t""\t"state_none"\t-\n' in text, 'music tables: the null state line')
+    for gen, model in ((voice_mutants, lambda d: wv_model(d)), (music_mutants, lambda d: imc_model(d, 'x')),
+                       (imuse_mutants, lambda d: imuse_model(d, 'x'))):
         refused = 0
         names = []
         for n, d in gen():
@@ -3611,6 +4344,13 @@ def write_fuzz_corpus(root):
         put('wv', name, data)
     for name, data in voice_mutants():
         put('wv', 'damaged_' + name, data)
+    for name, data, _ in music_fixtures():
+        put('imc', name, data)
+    for name, data in music_mutants():
+        put('imc', 'damaged_' + name, data)
+    put('imuse', 'tables.dll', make_imuse_dll()[0])
+    for name, data in imuse_mutants():
+        put('imuse', 'damaged_' + name, data)
     put('lab_file', 'voice', make_lab(voice_lab_entries()))   # default mode decodes the voice files
     put('lab_file', 'voice_mixed', make_lab(sound_lab_entries()))
 
@@ -3647,8 +4387,11 @@ def write_all(outdir):
     write_file(os.path.join(outdir, 'hostile', 'names.z'), unsafe_name_z())
     for name, data, _ in voice_fixtures():
         write_file(os.path.join(loose, 'wv', name), data)
+    for name, data, _ in music_fixtures():
+        write_file(os.path.join(loose, 'imc', name), data)
+    write_file(os.path.join(loose, 'imuse', 'IMUSE.DLL'), make_imuse_dll()[0])
     write_file(os.path.join(loose, 'lab', 'voice.lab'), make_lab(sound_lab_entries()))
-    for sub, gen in (('wv', voice_mutants),):
+    for sub, gen in (('wv', voice_mutants), ('imc', music_mutants), ('imuse', imuse_mutants)):
         for mname, data in gen():
             write_file(os.path.join(outdir, 'damaged', sub, mname), data)
     return 0
